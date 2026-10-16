@@ -12,6 +12,26 @@ const EDGE_LABEL_MAP = {
   LED_TO: '→', TARGETS: '→',
 }
 
+// Mirrors the ID-prefix convention from queries.py so we can guess node labels
+// when the backend doesn't return them explicitly.
+function _labelFromId(id) {
+  if (!id) return null
+  if (id.startsWith('C_')) return 'Customer'
+  if (id.startsWith('A_')) return 'Account'
+  if (id.startsWith('T_')) return 'Transaction'
+  if (id.startsWith('D_')) return 'Device'
+  if (id.startsWith('ADDR_')) return 'Address'
+  if (id.startsWith('IP_')) return 'IP'
+  if (id.startsWith('PH_')) return 'Phone'
+  if (id.startsWith('M_')) return 'Merchant'
+  if (id.startsWith('AL_')) return 'Alert'
+  if (id.startsWith('CASE_')) return 'Case'
+  if (id.startsWith('EV_')) return 'Evidence'
+  if (id.startsWith('DEC_')) return 'Decision'
+  if (id.startsWith('ACT_')) return 'Action'
+  return null
+}
+
 function makeNode(id, label, props = {}) {
   return {
     data: {
@@ -65,55 +85,83 @@ export default function App() {
               ? JSON.parse(step.observation)
               : step.observation
 
-            if (step.tool === 'get_entity_profile' && obs?.node) {
+            // Normalize tool name: strip trailing _tool suffix so comparisons work
+            // regardless of whether the MCP server appends it.
+            const toolName = (step.tool || '').replace(/_tool$/, '')
+
+            if (toolName === 'get_entity_profile' && obs?.node) {
               const n = obs.node
-              allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status }))
+              const nodeLabel = n.label || _labelFromId(n.id) || 'Node'
+              allEls.push(makeNode(n.id, nodeLabel, { risk_score: n.risk_score, status: n.status }))
+              // Also render neighbours as nodes
+              ;(obs.neighbors || []).forEach(nb => {
+                if (nb.id) {
+                  const nbLabel = nb.label || _labelFromId(nb.id) || 'Node'
+                  allEls.push(makeNode(nb.id, nbLabel, {}))
+                  allEls.push(makeEdge(n.id, nb.id, nb.rel || 'REL'))
+                }
+              })
             }
 
-            if (step.tool === 'expand_neighborhood') {
+            if (toolName === 'expand_neighborhood') {
+              // Each item is {data: {id, label, properties}} / {data: {source, target, type}}
               const nodes = obs?.nodes || []
               const edges = obs?.edges || []
-              nodes.forEach(n => allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status })))
-              edges.forEach(e => allEls.push(makeEdge(e.source, e.target, e.type)))
+              nodes.forEach(n => {
+                const nd = n.data || n
+                const nodeLabel = nd.label || _labelFromId(nd.id) || 'Node'
+                const props = nd.properties || {}
+                allEls.push(makeNode(nd.id, nodeLabel, { risk_score: props.risk_score, status: props.status }))
+              })
+              edges.forEach(e => {
+                const ed = e.data || e
+                allEls.push(makeEdge(ed.source, ed.target, ed.type || ed.label || 'REL'))
+              })
             }
 
-            if (step.tool === 'find_paths' && obs?.paths) {
-              const firstPath = obs.paths[0]
-              if (firstPath?.nodes) {
-                const pathNodes = firstPath.nodes.map(n => ({
-                  ...makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status }),
-                  classes: 'highlighted'
-                }))
-                const pathEdges = []
-                for (let i = 0; i < firstPath.nodes.length - 1; i++) {
-                  pathEdges.push({ ...makeEdge(firstPath.nodes[i].id, firstPath.nodes[i+1].id, firstPath.rels?.[i]?.type || 'REL'), classes: 'highlighted-edge' })
+            if (toolName === 'find_paths') {
+              // find_paths returns [{ids, rels, hops}]
+              const pathList = Array.isArray(obs) ? obs : obs?.paths || []
+              const firstPath = pathList[0]
+              if (firstPath?.ids) {
+                const ids = firstPath.ids
+                const rels = firstPath.rels || []
+                ids.forEach(id => {
+                  const nodeLabel = _labelFromId(id) || 'Node'
+                  allEls.push({ ...makeNode(id, nodeLabel, {}), classes: 'highlighted' })
+                })
+                for (let i = 0; i < ids.length - 1; i++) {
+                  allEls.push({ ...makeEdge(ids[i], ids[i + 1], rels[i] || 'REL'), classes: 'highlighted-edge' })
                 }
-                allEls.push(...pathNodes, ...pathEdges)
               } else if (obs?.path_nodes) {
                 addPath(obs)
               }
             }
 
-            if (step.tool === 'detect_communities' && obs?.members) {
+            if (toolName === 'detect_communities' && obs?.members) {
               obs.members.forEach(n => {
-                allEls.push({ ...makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score }), classes: 'highlighted' })
+                const nodeLabel = (n.labels && n.labels[0]) || n.label || _labelFromId(n.id) || 'Node'
+                allEls.push({ ...makeNode(n.id, nodeLabel, { risk_score: n.risk_score }), classes: 'highlighted' })
               })
             }
 
-            if (step.tool === 'rank_central_nodes' && obs?.nodes) {
-              obs.nodes.forEach(n => {
-                const el = makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, degree: n.degree })
+            if (toolName === 'rank_central_nodes') {
+              // rank_central_nodes returns a list directly
+              const rankList = Array.isArray(obs) ? obs : obs?.nodes || []
+              rankList.forEach(n => {
+                const nodeLabel = n.label || _labelFromId(n.id) || 'Node'
+                const el = makeNode(n.id, nodeLabel, { risk_score: n.risk_score, degree: n.degree })
                 if ((n.degree || 0) > 3) el.classes = 'highlighted'
                 allEls.push(el)
               })
             }
 
-            if (step.tool === 'trace_money_flow' && obs) {
+            if (toolName === 'trace_money_flow' && obs) {
               const accts = [...(obs.inbound || []), ...(obs.outbound || [])]
               accts.forEach(n => allEls.push(makeNode(n.id || n.account_id, 'Account', { status: n.status })))
             }
 
-            if (step.tool === 'score_cluster' && obs?.members) {
+            if (toolName === 'score_cluster' && obs?.members) {
               obs.members.forEach(n => allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score })))
             }
 

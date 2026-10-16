@@ -51,6 +51,9 @@ const STYLESHEET = [
   { selector: 'node[nodeLabel="Decision"]', style: { 'background-color': '#34d399', 'shape': 'barrel' } },
   { selector: 'node[nodeLabel="Action"]', style: { 'background-color': '#fb923c', 'shape': 'tag' } },
   { selector: 'node[nodeLabel="Evidence"]', style: { 'background-color': '#a78bfa', 'shape': 'vee' } },
+  { selector: 'node[nodeLabel="Phone"]', style: { 'background-color': '#f472b6', 'shape': 'round-triangle' } },
+  { selector: 'node[nodeLabel="Merchant"]', style: { 'background-color': '#fcd34d', 'shape': 'pentagon' } },
+  { selector: 'node[nodeLabel="Email"]', style: { 'background-color': '#c084fc', 'shape': 'cut-rectangle' } },
   {
     selector: 'edge',
     style: {
