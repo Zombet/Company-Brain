@@ -328,3 +328,94 @@ body {
 }
 .session-item:hover { background: var(--bg-tertiary); border-color: var(--border); }
 .session-date { color: var(--text-secondary); font-size: 0.72rem; }
+
+/* FEAT-003 additions */
+.node-type-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.risk-bar-container {
+  width: 100%;
+  height: 8px;
+  background: #1e293b;
+  border-radius: 4px;
+  margin: 6px 0;
+  overflow: hidden;
+}
+
+.risk-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+
+.kv-table {
+  width: 100%;
+  font-size: 0.75rem;
+  border-collapse: collapse;
+}
+
+.kv-table td {
+  padding: 2px 6px;
+  border-bottom: 1px solid #334155;
+}
+
+.kv-table td:first-child {
+  color: #94a3b8;
+  width: 40%;
+}
+
+.obs-summary {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  word-break: break-all;
+}
+
+.scenario-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 16px;
+  border-top: 1px solid #334155;
+  align-items: center;
+}
+
+.scenario-chip {
+  background: #1e293b;
+  border: 1px solid #f59e0b44;
+  color: #f59e0b;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.scenario-chip:hover {
+  border-color: #f59e0b;
+  background: #f59e0b11;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.md-table th, .md-table td {
+  border: 1px solid #334155;
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.md-table th {
+  background: #1e293b;
+  color: #94a3b8;
+  font-weight: 600;
+}

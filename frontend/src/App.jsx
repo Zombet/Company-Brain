@@ -3,13 +3,45 @@ import ChatPanel from './components/ChatPanel'
 import GraphPanel from './components/GraphPanel'
 import { useAgent } from './hooks/useAgent'
 import { useGraph } from './hooks/useGraph'
-import { getOverview, getNeighbors } from './api/client'
+import { getOverview } from './api/client'
+
+const EDGE_LABEL_MAP = {
+  SENT: 'SND', TO: '→', OWNS: 'OWN', USED_DEVICE: 'USED', LOGGED_IN_FROM: 'IP',
+  LIVES_AT: 'AT', HAS_PHONE: 'PH', HAS_EMAIL: '@', TRIGGERED_BY: 'TRIG',
+  CONTAINS: 'HAS', HAS_EVIDENCE: 'EV', ABOUT: 'RE', EVIDENCED_BY: 'EV',
+  LED_TO: '→', TARGETS: '→',
+}
+
+function makeNode(id, label, props = {}) {
+  return {
+    data: {
+      id,
+      label,
+      nodeLabel: label,
+      id_short: String(id).substring(0, 12),
+      ...props,
+    }
+  }
+}
+
+function makeEdge(source, target, type, extraProps = {}) {
+  return {
+    data: {
+      id: `${source}-${target}-${type}`,
+      source,
+      target,
+      label: type,
+      shortLabel: EDGE_LABEL_MAP[type] || type,
+      ...extraProps,
+    }
+  }
+}
 
 export default function App() {
   const [status, setStatus] = useState('checking')
-  const [history, setHistory] = useState([])
+  const [prefilledQuery, setPrefilledQuery] = useState('')
   const { sendQuery, messages, isLoading } = useAgent()
-  const { elements, addNodes, addPath, clearGraph } = useGraph()
+  const { elements, addNodes, addPath, addSubgraph, clearGraph } = useGraph()
 
   useEffect(() => {
     fetch('http://localhost:8000/health')
@@ -18,49 +50,86 @@ export default function App() {
       .catch(() => setStatus('error'))
   }, [])
 
+  const handleNodeInvestigate = (id) => {
+    setPrefilledQuery(`Investigate ${id}`)
+  }
+
   const handleSend = (query) => {
+    setPrefilledQuery('')
     sendQuery(query, (result) => {
-      // When agent finishes, try to load neighbor graph for any account mentioned
       if (result?.steps) {
+        const allEls = []
         result.steps.forEach(step => {
-          if (step.tool === 'get_risk_neighbors' || step.tool === 'trace_fraud_ring') {
-            try {
-              const accountId = step.tool_input?.account_id
-              if (accountId) {
-                getNeighbors(accountId).then(r => {
-                  const neighbors = r.data?.neighbors || []
-                  const newNodes = [
-                    { data: { id: accountId, label: accountId, type: 'Account' } },
-                    ...neighbors.map(n => ({
-                      data: {
-                        id: n.neighbor_id,
-                        label: n.neighbor_id,
-                        type: (n.neighbor_labels && n.neighbor_labels[0]) || 'Node',
-                        risk_score: n.risk_score,
-                        status: n.status,
-                      }
-                    })),
-                  ]
-                  const newEdges = neighbors.map(n => ({
-                    data: {
-                      id: `${accountId}-${n.neighbor_id}-${n.relationship_type}`,
-                      source: accountId,
-                      target: n.neighbor_id,
-                      label: n.relationship_type,
-                    }
-                  }))
-                  addNodes([...newNodes, ...newEdges])
-                }).catch(() => {})
+          try {
+            const obs = typeof step.observation === 'string'
+              ? JSON.parse(step.observation)
+              : step.observation
+
+            if (step.tool === 'get_entity_profile' && obs?.node) {
+              const n = obs.node
+              allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status }))
+            }
+
+            if (step.tool === 'expand_neighborhood') {
+              const nodes = obs?.nodes || []
+              const edges = obs?.edges || []
+              nodes.forEach(n => allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status })))
+              edges.forEach(e => allEls.push(makeEdge(e.source, e.target, e.type)))
+            }
+
+            if (step.tool === 'find_paths' && obs?.paths) {
+              const firstPath = obs.paths[0]
+              if (firstPath?.nodes) {
+                const pathNodes = firstPath.nodes.map(n => ({
+                  ...makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, status: n.status }),
+                  classes: 'highlighted'
+                }))
+                const pathEdges = []
+                for (let i = 0; i < firstPath.nodes.length - 1; i++) {
+                  pathEdges.push({ ...makeEdge(firstPath.nodes[i].id, firstPath.nodes[i+1].id, firstPath.rels?.[i]?.type || 'REL'), classes: 'highlighted-edge' })
+                }
+                allEls.push(...pathNodes, ...pathEdges)
+              } else if (obs?.path_nodes) {
+                addPath(obs)
               }
-            } catch (e) {}
-          }
-          if (step.tool === 'get_transaction_path') {
-            try {
-              const obs = typeof step.observation === 'string' ? JSON.parse(step.observation) : step.observation
-              if (obs?.path_nodes) addPath(obs)
-            } catch (e) {}
+            }
+
+            if (step.tool === 'detect_communities' && obs?.members) {
+              obs.members.forEach(n => {
+                allEls.push({ ...makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score }), classes: 'highlighted' })
+              })
+            }
+
+            if (step.tool === 'rank_central_nodes' && obs?.nodes) {
+              obs.nodes.forEach(n => {
+                const el = makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score, degree: n.degree })
+                if ((n.degree || 0) > 3) el.classes = 'highlighted'
+                allEls.push(el)
+              })
+            }
+
+            if (step.tool === 'trace_money_flow' && obs) {
+              const accts = [...(obs.inbound || []), ...(obs.outbound || [])]
+              accts.forEach(n => allEls.push(makeNode(n.id || n.account_id, 'Account', { status: n.status })))
+            }
+
+            if (step.tool === 'score_cluster' && obs?.members) {
+              obs.members.forEach(n => allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score })))
+            }
+
+            if (obs?.subgraph) {
+              addSubgraph(obs.subgraph)
+            }
+          } catch (e) {
+            // JSON parse might fail for non-JSON observations
           }
         })
+
+        if (result?.subgraph) {
+          addSubgraph(result.subgraph)
+        } else if (allEls.length > 0) {
+          addNodes(allEls)
+        }
       }
     })
   }
@@ -82,12 +151,13 @@ export default function App() {
           messages={messages}
           isLoading={isLoading}
           onSend={handleSend}
-          history={history}
+          prefilledQuery={prefilledQuery}
         />
         <GraphPanel
           elements={elements}
           onNodeSelect={() => {}}
           onInvestigate={(query) => handleSend(query)}
+          onNodeInvestigate={handleNodeInvestigate}
         />
       </div>
     </div>

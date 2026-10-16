@@ -3,12 +3,30 @@ import CytoscapeComponent from 'react-cytoscapejs'
 import NodeDetail from './NodeDetail'
 import { getOverview } from '../api/client'
 
+const EDGE_LABEL_MAP = {
+  SENT: 'SND',
+  TO: '→',
+  OWNS: 'OWN',
+  USED_DEVICE: 'USED',
+  LOGGED_IN_FROM: 'IP',
+  LIVES_AT: 'AT',
+  HAS_PHONE: 'PH',
+  HAS_EMAIL: '@',
+  TRIGGERED_BY: 'TRIG',
+  CONTAINS: 'HAS',
+  HAS_EVIDENCE: 'EV',
+  ABOUT: 'RE',
+  EVIDENCED_BY: 'EV',
+  LED_TO: '→',
+  TARGETS: '→',
+}
+
 const STYLESHEET = [
   {
     selector: 'node',
     style: {
       'background-color': '#64748b',
-      'label': 'data(label)',
+      'label': 'data(id_short)',
       'color': '#f1f5f9',
       'font-size': '9px',
       'text-valign': 'bottom',
@@ -17,17 +35,22 @@ const STYLESHEET = [
       'height': 36,
       'border-width': 2,
       'border-color': '#475569',
+      'shape': 'ellipse',
     }
   },
-  { selector: 'node[type="Account"][status="active"]',        style: { 'background-color': '#22c55e' } },
-  { selector: 'node[type="Account"][status="flagged"]',       style: { 'background-color': '#ef4444' } },
-  { selector: 'node[type="Account"][status="frozen"]',        style: { 'background-color': '#f97316' } },
-  { selector: 'node[type="Transaction"][status="flagged"]',   style: { 'background-color': '#f97316' } },
-  { selector: 'node[type="Transaction"][status="confirmed_fraud"]', style: { 'background-color': '#dc2626' } },
-  { selector: 'node[type="Transaction"]',                     style: { 'background-color': '#3b82f6', 'shape': 'diamond', 'width': 28, 'height': 28 } },
-  { selector: 'node[type="Customer"]',                        style: { 'background-color': '#8b5cf6', 'shape': 'ellipse' } },
-  { selector: 'node[type="Device"]',                          style: { 'background-color': '#a855f7', 'shape': 'rectangle' } },
-  { selector: 'node[type="Merchant"]',                        style: { 'background-color': '#eab308', 'shape': 'hexagon' } },
+  { selector: 'node[nodeLabel="Customer"]', style: { 'background-color': '#4ade80', 'shape': 'ellipse' } },
+  { selector: 'node[nodeLabel="Account"]', style: { 'background-color': '#3b82f6', 'shape': 'rectangle' } },
+  { selector: 'node[nodeLabel="Account"][status="frozen"]', style: { 'background-color': '#ef4444' } },
+  { selector: 'node[nodeLabel="Transaction"]', style: { 'background-color': '#a78bfa', 'shape': 'triangle', 'width': 32, 'height': 32 } },
+  { selector: 'node[nodeLabel="Transaction"][status="flagged"]', style: { 'background-color': '#f59e0b' } },
+  { selector: 'node[nodeLabel="Device"]', style: { 'background-color': '#06b6d4', 'shape': 'diamond' } },
+  { selector: 'node[nodeLabel="Address"]', style: { 'background-color': '#84cc16', 'shape': 'hexagon' } },
+  { selector: 'node[nodeLabel="IP"]', style: { 'background-color': '#e879f9', 'shape': 'star' } },
+  { selector: 'node[nodeLabel="Alert"]', style: { 'background-color': '#ef4444', 'shape': 'octagon', 'width': 44, 'height': 44 } },
+  { selector: 'node[nodeLabel="Case"]', style: { 'background-color': '#fbbf24', 'shape': 'round-rectangle' } },
+  { selector: 'node[nodeLabel="Decision"]', style: { 'background-color': '#34d399', 'shape': 'barrel' } },
+  { selector: 'node[nodeLabel="Action"]', style: { 'background-color': '#fb923c', 'shape': 'tag' } },
+  { selector: 'node[nodeLabel="Evidence"]', style: { 'background-color': '#a78bfa', 'shape': 'vee' } },
   {
     selector: 'edge',
     style: {
@@ -36,13 +59,28 @@ const STYLESHEET = [
       'target-arrow-color': '#475569',
       'target-arrow-shape': 'triangle',
       'curve-style': 'bezier',
-      'label': 'data(label)',
+      'label': 'data(shortLabel)',
       'font-size': '8px',
       'color': '#94a3b8',
     }
   },
-  { selector: 'edge.traversal-path',  style: { 'line-color': '#f59e0b', 'width': 4, 'target-arrow-color': '#f59e0b' } },
-  { selector: 'node.highlighted',     style: { 'border-color': '#fbbf24', 'border-width': 4 } },
+  { selector: 'node.highlighted', style: { 'border-color': '#fbbf24', 'border-width': 4 } },
+  { selector: 'edge.highlighted-edge', style: { 'line-color': '#fbbf24', 'width': 3, 'target-arrow-color': '#fbbf24' } },
+  { selector: 'edge.traversal-path', style: { 'line-color': '#f59e0b', 'width': 4, 'target-arrow-color': '#f59e0b' } },
+]
+
+const LEGEND_ITEMS = [
+  { color: '#4ade80', label: 'Customer' },
+  { color: '#3b82f6', label: 'Account' },
+  { color: '#a78bfa', label: 'Transaction' },
+  { color: '#06b6d4', label: 'Device' },
+  { color: '#84cc16', label: 'Address' },
+  { color: '#e879f9', label: 'IP' },
+  { color: '#ef4444', label: 'Alert' },
+  { color: '#fbbf24', label: 'Case' },
+  { color: '#34d399', label: 'Decision' },
+  { color: '#fb923c', label: 'Action' },
+  { color: '#a78bfa', label: 'Evidence' },
 ]
 
 export default function GraphPanel({ elements, onNodeSelect, onInvestigate }) {
@@ -85,8 +123,8 @@ export default function GraphPanel({ elements, onNodeSelect, onInvestigate }) {
             <span className="lbl" style={{color: '#ef4444'}}>Flagged</span>
           </div>
           <div className="overview-stat">
-            <span className="num">{overview.node_counts?.AgentSession || 0}</span>
-            <span className="lbl">Sessions</span>
+            <span className="num">{overview.node_counts?.Alert || 0}</span>
+            <span className="lbl">Alerts</span>
           </div>
         </div>
       )}
@@ -110,15 +148,7 @@ export default function GraphPanel({ elements, onNodeSelect, onInvestigate }) {
       )}
 
       <div className="graph-legend">
-        {[
-          { color: '#22c55e', label: 'Account (active)' },
-          { color: '#ef4444', label: 'Account (flagged)' },
-          { color: '#3b82f6', label: 'Transaction' },
-          { color: '#f97316', label: 'Transaction (flagged)' },
-          { color: '#8b5cf6', label: 'Customer' },
-          { color: '#a855f7', label: 'Device' },
-          { color: '#eab308', label: 'Merchant' },
-        ].map(({ color, label }) => (
+        {LEGEND_ITEMS.map(({ color, label }) => (
           <div key={label} className="legend-item">
             <div className="legend-dot" style={{background: color}} />
             <span style={{color: '#94a3b8'}}>{label}</span>
@@ -132,7 +162,7 @@ export default function GraphPanel({ elements, onNodeSelect, onInvestigate }) {
           onClose={() => setSelectedNode(null)}
           onInvestigate={(id) => {
             setSelectedNode(null)
-            if (onInvestigate) onInvestigate(`Investigate account ${id}`)
+            if (onInvestigate) onInvestigate(`Investigate ${id}`)
           }}
         />
       )}

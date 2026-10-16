@@ -3,19 +3,65 @@ import ToolCallLog from './ToolCallLog'
 import SessionHistory from './SessionHistory'
 
 const EXAMPLE_QUERIES = [
-  'Investigate transaction TXN-015',
-  'Trace fraud ring for ACC-004',
-  'Find path between ACC-001 and ACC-006',
-  'What accounts are linked to TXN-019?',
+  'Investigate C_kunal',
+  'Find fraud ring from AL_ring_alert',
+  'Trace mule chain from C_john',
+  'Find path between C_kunal and C_kingpin',
 ]
 
-export default function ChatPanel({ messages, isLoading, onSend, history }) {
+const SCENARIO_CHIPS = [
+  { name: 'Fraud Ring', query: 'Investigate the fraud ring starting from C_kunal' },
+  { name: 'Mule Chain', query: 'Trace the mule chain starting from A_john1' },
+  { name: 'Circular Flow', query: 'Find circular money flow involving C_omar' },
+  { name: 'Decoy Family', query: 'Investigate C_raj - should this family be flagged?' },
+  { name: 'Kingpin', query: 'Who is the bridge node connecting the fraud ring and mule chain?' },
+]
+
+function renderMarkdown(text) {
+  if (!text) return ''
+  const lines = text.split('\n')
+  const result = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (line.trim().startsWith('|')) {
+      const tableLines = []
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        tableLines.push(lines[i])
+        i++
+      }
+      const nonSep = tableLines.filter(l => !/^\s*\|[-| :]+\|\s*$/.test(l))
+      if (nonSep.length > 0) {
+        const parseRow = (l) => l.split('|').filter((_, idx, arr) => idx > 0 && idx < arr.length - 1).map(c => c.trim())
+        const [headerRow, ...bodyRows] = nonSep
+        const headers = parseRow(headerRow)
+        const rows = bodyRows.map(parseRow)
+        result.push('<table class="md-table"><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => `<td>${c}</td>`).join('') + '</tr>').join('') + '</tbody></table>')
+      }
+    } else {
+      result.push(line)
+      i++
+    }
+  }
+  let html = result.join('\n')
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/&lt;br&gt;/g, '<br/>')
+  html = html.replace(/<br>/gi, '<br/>')
+  html = html.replace(/\n/g, '<br/>')
+  return html
+}
+
+export default function ChatPanel({ messages, isLoading, onSend, history, prefilledQuery }) {
   const [input, setInput] = useState('')
   const bottomRef = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    if (prefilledQuery) setInput(prefilledQuery)
+  }, [prefilledQuery])
 
   const handleSend = () => {
     const q = input.trim()
@@ -46,7 +92,7 @@ export default function ChatPanel({ messages, isLoading, onSend, history }) {
               <div className="user-message">{msg.content}</div>
             ) : (
               <div className="agent-message">
-                <pre>{msg.content}</pre>
+                <div dangerouslySetInnerHTML={{__html: renderMarkdown(msg.content)}} />
                 {msg.steps && msg.steps.length > 0 && (
                   <ToolCallLog steps={msg.steps} />
                 )}
@@ -65,9 +111,13 @@ export default function ChatPanel({ messages, isLoading, onSend, history }) {
       <SessionHistory history={history} />
       <div className="query-chips">
         {EXAMPLE_QUERIES.map(q => (
-          <button key={q} className="chip" onClick={() => onSend(q)}>
-            {q}
-          </button>
+          <button key={q} className="chip" onClick={() => onSend(q)}>{q}</button>
+        ))}
+      </div>
+      <div className="scenario-chips">
+        <span style={{fontSize: '0.72rem', color: '#f59e0b', marginRight: 6, alignSelf: 'center'}}>Demo Scenarios:</span>
+        {SCENARIO_CHIPS.map(s => (
+          <button key={s.name} className="scenario-chip" onClick={() => onSend(s.query)}>{s.name}</button>
         ))}
       </div>
       <div className="query-input-area">
@@ -79,9 +129,7 @@ export default function ChatPanel({ messages, isLoading, onSend, history }) {
           placeholder="Ask about a transaction, account, or fraud pattern..."
           rows={1}
         />
-        <button className="send-btn" onClick={handleSend} disabled={isLoading || !input.trim()}>
-          Send
-        </button>
+        <button className="send-btn" onClick={handleSend} disabled={isLoading || !input.trim()}>Send</button>
       </div>
     </div>
   )
