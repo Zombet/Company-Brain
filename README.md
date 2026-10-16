@@ -42,29 +42,64 @@ A real-time fraud investigation agent where FalkorDB is the irreplaceable core. 
 
 ## Graph Data Model
 
-### Node Types (6)
+The schema promotes shared attributes to nodes so fraud rings become traversable paths. A shared device is only discoverable as a multi-hop connection if the device is a node, not a property.
 
-| Label | Key Properties |
-|---|---|
-| **Transaction** | `id`, `amount`, `currency`, `timestamp`, `status`, `channel`, `risk_score`, `description` |
-| **Account** | `id`, `account_type`, `bank_name`, `balance`, `status`, `risk_score`, `flag_reason`, `flagged_at`, `flagged_by` |
-| **Customer** | `id`, `name`, `email`, `phone`, `country`, `kyc_status`, `risk_score` |
-| **Merchant** | `id`, `name`, `category`, `country`, `risk_score`, `is_flagged` |
-| **Device** | `id`, `fingerprint`, `device_type`, `os`, `ip_address`, `first_seen`, `last_seen` |
-| **AgentSession** | `session_id`, `started_at`, `ended_at`, `query`, `conclusion`, `tools_used`, `account_ids` |
+### Node Types (13)
 
-### Relationship Types (8)
+#### Data Layer
+
+| Label | ID Prefix | Key Properties |
+|---|---|---|
+| **Customer** | `C_` | `id`, `name`, `email`, `kyc_status`, `risk_score`, `community_id`, `community_computed_at` |
+| **Account** | `A_` | `id`, `account_type`, `bank_name`, `balance`, `status` (`active`\|`frozen`), `risk_score` |
+| **Transaction** | `T_` | `id`, `amount`, `currency`, `ts`, `status`, `channel`, `risk_score` |
+| **Device** | `D_` | `id`, `fingerprint`, `device_type`, `os`, `first_seen`, `last_seen` |
+| **IP** | `IP_` | `id`, `address`, `country`, `isp` |
+| **Phone** | *(none)* | `id`, `number`, `carrier` |
+| **Address** | `ADDR_` | `id`, `street`, `city`, `country` |
+| **Email** | *(none)* | `id`, `address`, `domain` |
+| **Merchant** | *(none)* | `id`, `name`, `category`, `country`, `risk_score` |
+
+#### Agent / Audit Layer
+
+| Label | ID Prefix | Key Properties |
+|---|---|---|
+| **Alert** | `AL_` | `id`, `type`, `severity`, `ts` |
+| **Case** | `CASE_` | `id`, `status`, `opened_at`, `closed_at` |
+| **Decision** | `DEC_` | `id`, `verdict`, `confidence`, `rationale`, `ts` |
+| **Evidence** | `EV_` | `id`, `kind`, `summary`, `entities`, `payload` |
+| **Action** | `ACT_` | `id`, `type`, `dry_run`, `reason`, `ts` |
+
+### Relationship Types
 
 | Type | From → To | Key Properties |
 |---|---|---|
-| **MADE** | Account → Transaction | `at` (timestamp), `channel` |
 | **OWNS** | Customer → Account | `since` |
+| **SENT** | Account → Transaction | `ts`, `amount` |
+| **TO** | Transaction → Account | — |
+| **USED_DEVICE** | Customer → Device | `first_seen`, `last_seen` |
+| **LOGGED_IN_FROM** | Customer → IP | `ts` |
+| **HAS_PHONE** | Customer → Phone | — |
+| **LIVES_AT** | Customer → Address | — |
+| **HAS_EMAIL** | Customer → Email | — |
 | **AT** | Transaction → Merchant | `processed_at` |
-| **USED** | Account → Device | `first_used`, `last_used`, `use_count` |
-| **TRANSFERRED_TO** | Account → Account | `amount`, `timestamp`, `reference`, `flagged` |
-| **SHARED_DEVICE** | Account → Account | `device_id`, `overlap_period` |
-| **INVESTIGATED** | AgentSession → Account | `role` |
-| **FLAGGED_DURING** | AgentSession → Account | `reason` |
+| **TRIGGERED_BY** | Alert → Transaction\|Account | — |
+| **CONTAINS** | Case → Alert | — |
+| **ABOUT** | Decision → Case | — |
+| **EVIDENCED_BY** | Decision → Evidence | — |
+| **LED_TO** | Decision → Action | — |
+| **TARGETS** | Action → Account\|Customer\|Case | — |
+
+### ID Convention
+
+The prefix on every ID tells tools which label to query, enabling safe, label-aware lookups without ambiguity:
+
+```
+C_     Customer        A_     Account         T_     Transaction
+D_     Device          IP_    IP              ADDR_  Address
+AL_    Alert           CASE_  Case            DEC_   Decision
+EV_    Evidence        ACT_   Action
+```
 
 ## Setup Instructions
 
@@ -228,12 +263,26 @@ ORDER BY neighbor.risk_score DESC
 
 ## Example Investigation Questions
 
-- `"Investigate transaction TXN-015"`
-- `"Trace fraud ring for ACC-004"`
-- `"Find path between ACC-001 and ACC-006"`
-- `"What accounts are linked to TXN-019?"`
-- `"Check investigation history for ACC-004"`
-- `"Flag ACC-008 for suspicious activity"`
+- `"Investigate C_kunal — are they part of a fraud ring?"`
+- `"Trace money flow from A_john1 over the last 7 days"`
+- `"Why was alert AL_ring_alert triggered?"`
+- `"Find path between A_kunal1 and A_lisa1"`
+- `"What accounts are linked to T_mule1?"`
+- `"Flag A_kingpin1 for suspicious activity"`
+- `"Which customers share Device D_shared1?"`
+- `"Detect communities starting from C_aryan"`
+
+## Seeded Fraud Scenarios
+
+The synthetic seed data is not random — each scenario is crafted to reward smart graph queries and test the agent's discernment.
+
+| Scenario | Description |
+|---|---|
+| **Fraud Ring** | 6–8 customers (including `C_kunal`, `C_aryan`, `C_ifrah`) with no direct links but all reachable through 2 shared devices (`D_ring1`, `D_ring2`) and 1 shared address (`ADDR_ring1`) — 3 hops apart. |
+| **Mule Chain** | Money passes through a chain `C_john → C_sarah → C_mike → C_lisa` (accounts `A_john1 → A_sarah1 → A_mike1 → A_lisa1`) with decreasing amounts over short intervals ending at a cash-out. |
+| **Circular Flow** | Funds cycle back to their origin: `A_circ1 → A_circ2 → A_circ3 → A_circ1`, making the money appear to move without leaving the ring. |
+| **Decoy (False Positive)** | Legitimate family members `C_raj`, `C_meera`, and `C_aditya` share a device and address — they look suspicious on naive queries but should be cleared by the agent. |
+| **Bridge / Kingpin** | `C_kingpin` controls a high-centrality account (`A_kingpin1`) that bridges two otherwise-unconnected clusters; not obvious by transaction volume alone, revealed by betweenness centrality. |
 
 ## Tech Stack
 
