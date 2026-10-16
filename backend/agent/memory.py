@@ -7,8 +7,11 @@ from graph.client import get_graph
 from graph.queries import persist_session_to_graph
 
 
-async def persist_session(session_id, query, conclusion, tools_used, started_at, ended_at):
-    """Parse LangChain intermediate steps and persist session memory to FalkorDB."""
+async def persist_session(session_id, query, conclusion, tool_steps, started_at, ended_at):
+    """Parse tool steps and persist session memory to FalkorDB.
+
+    tool_steps: list of (tool_name, tool_input_dict, observation_str) tuples
+    """
     graph = get_graph()
 
     investigated_ids = []
@@ -17,12 +20,10 @@ async def persist_session(session_id, query, conclusion, tools_used, started_at,
     tools_used_names = []
 
     try:
-        for action, observation in tools_used:
-            tool_name = getattr(action, 'tool', '')
-            tool_input = getattr(action, 'tool_input', {})
-            if isinstance(tool_input, str):
+        for tool_name, tool_input, observation in tool_steps:
+            if not isinstance(tool_input, dict):
                 try:
-                    tool_input = json.loads(tool_input)
+                    tool_input = json.loads(tool_input) if isinstance(tool_input, str) else {}
                 except Exception:
                     tool_input = {}
             tools_used_names.append(tool_name)
@@ -32,7 +33,7 @@ async def persist_session(session_id, query, conclusion, tools_used, started_at,
                 flagged_ids.append(tool_input.get('account_id', ''))
                 flag_reasons.append(tool_input.get('reason', ''))
     except Exception as e:
-        print(f"Warning: could not parse intermediate steps: {e}")
+        print(f"Warning: could not parse tool steps: {e}")
 
     session_data = {
         'session_id': session_id,

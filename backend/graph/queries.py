@@ -9,10 +9,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ---------------------------------------------------------------------------
 
 def _rows_to_dicts(result):
-    """Convert a FalkorDB result set into a list of dicts."""
+    """Convert a FalkorDB result set into a list of dicts.
+
+    FalkorDB returns headers as a list of [type_code, column_name] pairs,
+    e.g. [[1, 'account_id'], [1, 'status'], ...].  We extract the column
+    name (index 1) so it can be used as a dict key.
+    """
     if not result or not result.result_set:
         return []
-    headers = result.header
+    headers = []
+    for h in result.header:
+        if isinstance(h, (list, tuple)):
+            headers.append(h[1])
+        else:
+            headers.append(h)
     return [dict(zip(headers, row)) for row in result.result_set]
 
 
@@ -91,8 +101,7 @@ def query_transaction_path(graph, from_account_id: str, to_account_id: str) -> d
     cypher = """
 MATCH (a1:Account {id: $from_account_id}),
       (a2:Account {id: $to_account_id})
-WITH a1, a2
-MATCH path = shortestPath((a1)-[*..10]-(a2))
+WITH shortestPath((a1)-[*1..10]-(a2)) AS path
 RETURN
   [n IN nodes(path) | {id: n.id, labels: labels(n), risk_score: n.risk_score}] AS path_nodes,
   [r IN relationships(path) | {type: type(r), properties: properties(r)}]      AS path_rels,

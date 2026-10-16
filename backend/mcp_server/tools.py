@@ -1,9 +1,11 @@
 import sys
 import os
+import json
+
 # When run as subprocess (python -m mcp_server.tools), ensure backend/ is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from graph.client import get_graph
 from graph.queries import (
     query_connected_accounts,
@@ -17,46 +19,57 @@ from graph.queries import (
 mcp = FastMCP("fraud-investigation")
 
 
+def _str(data) -> str:
+    """Serialize tool output to a JSON string.
+
+    The OpenAI-compatible chat APIs (Groq/GPT-OSS) require tool-message
+    content to be a string, so every tool returns JSON text rather than a
+    raw Python object.  ``default=str`` guards against any non-serializable
+    FalkorDB types that slip through.
+    """
+    return json.dumps(data, default=str)
+
+
 @mcp.tool()
-def get_connected_accounts(transaction_id: str) -> list:
+def get_connected_accounts(transaction_id: str) -> str:
     """Find all accounts linked to a flagged transaction via shared devices, transfers, or same customer."""
     graph = get_graph()
-    return query_connected_accounts(graph, transaction_id)
+    return _str(query_connected_accounts(graph, transaction_id))
 
 
 @mcp.tool()
-def trace_fraud_ring(account_id: str) -> list:
+def trace_fraud_ring(account_id: str) -> str:
     """Trace fraud ring members up to 3 relationship hops from an account."""
     graph = get_graph()
-    return query_trace_fraud_ring(graph, account_id)
+    return _str(query_trace_fraud_ring(graph, account_id))
 
 
 @mcp.tool()
-def get_transaction_path(from_account_id: str, to_account_id: str) -> dict:
+def get_transaction_path(from_account_id: str, to_account_id: str) -> str:
     """Find the shortest path between two accounts in the graph."""
     graph = get_graph()
-    return query_transaction_path(graph, from_account_id, to_account_id)
+    return _str(query_transaction_path(graph, from_account_id, to_account_id))
 
 
 @mcp.tool()
-def get_investigation_history(account_id: str) -> list:
+def get_investigation_history(account_id: str) -> str:
     """Retrieve past agent investigation sessions stored in the graph for this account."""
     graph = get_graph()
-    return query_investigation_history(graph, account_id)
+    return _str(query_investigation_history(graph, account_id))
 
 
 @mcp.tool()
-def flag_account(account_id: str, reason: str) -> dict:
+def flag_account(account_id: str, reason: str) -> str:
     """Mark an account as flagged with a given reason. This writes to FalkorDB."""
     graph = get_graph()
-    return query_flag_account(graph, account_id, reason)
+    return _str(query_flag_account(graph, account_id, reason))
 
 
 @mcp.tool()
-def get_risk_neighbors(account_id: str) -> list:
+def get_risk_neighbors(account_id: str) -> str:
     """Get all direct neighbors of an account with their labels, relationship types, and risk scores."""
     graph = get_graph()
-    return query_risk_neighbors(graph, account_id)
+    return _str(query_risk_neighbors(graph, account_id))
 
 
 if __name__ == "__main__":

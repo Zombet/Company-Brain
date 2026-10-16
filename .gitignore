@@ -12,3 +12,5 @@ build/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+# Internal agent task artifacts
+.agents/
