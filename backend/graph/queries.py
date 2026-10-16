@@ -1,5 +1,7 @@
 import sys
 import os
+import uuid
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -26,184 +28,648 @@ def _rows_to_dicts(result):
     return [dict(zip(headers, row)) for row in result.result_set]
 
 
+def _label_from_id(entity_id: str) -> str:
+    """Detect the node label from the entity ID prefix convention."""
+    prefix_map = {
+        "C_": "Customer",
+        "A_": "Account",
+        "T_": "Transaction",
+        "D_": "Device",
+        "ADDR_": "Address",
+        "IP_": "IP",
+        "PH_": "Phone",
+        "M_": "Merchant",
+        "AL_": "Alert",
+        "CASE_": "Case",
+        "EV_": "Evidence",
+        "DEC_": "Decision",
+        "ACT_": "Action",
+    }
+    for prefix, label in prefix_map.items():
+        if entity_id.startswith(prefix):
+            return label
+    return "Customer"
+
+
 # ---------------------------------------------------------------------------
-# 1. Connected accounts for a flagged transaction
+# 1. Get entity profile (1-hop context)
 # ---------------------------------------------------------------------------
 
-def query_connected_accounts(graph, transaction_id: str) -> list:
-    """Return all accounts connected to the given transaction via shared
-    devices, transfers, or a common customer owner."""
-    cypher = """
-MATCH (t:Transaction {id: $transaction_id})<-[:MADE]-(a:Account)
-OPTIONAL MATCH (a)-[:USED]->(d:Device)<-[:USED]-(a2:Account)
-  WHERE a2.id <> a.id
-OPTIONAL MATCH (a)-[:TRANSFERRED_TO*1..2]-(a3:Account)
-  WHERE a3.id <> a.id
-OPTIONAL MATCH (a)<-[:OWNS]-(c:Customer)-[:OWNS]->(a4:Account)
-  WHERE a4.id <> a.id
-WITH a, collect(DISTINCT a2) + collect(DISTINCT a3) + collect(DISTINCT a4) AS connected
-UNWIND connected AS conn
-RETURN DISTINCT
-  conn.id          AS account_id,
-  conn.status      AS status,
-  conn.risk_score  AS risk_score,
-  conn.bank_name   AS bank_name
-ORDER BY conn.risk_score DESC
-"""
+def get_entity_profile(graph, entity_id: str) -> dict:
+    """Return node properties and all 1-hop neighbours for any entity.
+
+    Use this tool as the starting point for every investigation.
+    Detects label from ID prefix (C_->Customer, A_->Account, T_->Transaction, etc.).
+    """
+    label = _label_from_id(entity_id)
     try:
-        result = graph.query(cypher, {"transaction_id": transaction_id})
-        return _rows_to_dicts(result)
-    except Exception as exc:
-        print(f"[queries] query_connected_accounts warning: {exc}")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# 2. Trace fraud ring from an account
-# ---------------------------------------------------------------------------
-
-def query_trace_fraud_ring(graph, account_id: str) -> list:
-    """Walk up to 3 hops from account_id and return neighbours that are
-    flagged or confirmed fraud."""
-    cypher = """
-MATCH path = (start:Account {id: $account_id})-[*1..3]-(neighbor:Account)
-WHERE neighbor.status IN ['flagged', 'confirmed_fraud']
-  AND neighbor.id <> $account_id
-WITH neighbor,
-     length(path)          AS hops,
-     [r IN relationships(path) | type(r)] AS rel_types,
-     [n IN nodes(path) | n.id]            AS path_ids
-RETURN DISTINCT
-  neighbor.id         AS account_id,
-  neighbor.status     AS status,
-  neighbor.risk_score AS risk_score,
-  hops,
-  rel_types,
-  path_ids
-ORDER BY neighbor.risk_score DESC, hops ASC
-LIMIT 50
-"""
-    try:
-        result = graph.query(cypher, {"account_id": account_id})
-        return _rows_to_dicts(result)
-    except Exception as exc:
-        print(f"[queries] query_trace_fraud_ring warning: {exc}")
-        return []
-
-
-# ---------------------------------------------------------------------------
-# 3. Shortest transaction path between two accounts
-# ---------------------------------------------------------------------------
-
-def query_transaction_path(graph, from_account_id: str, to_account_id: str) -> dict:
-    """Return the shortest path between two accounts, with node and
-    relationship metadata.  Returns {} when no path exists."""
-    cypher = """
-MATCH (a1:Account {id: $from_account_id}),
-      (a2:Account {id: $to_account_id})
-WITH shortestPath((a1)-[*1..10]-(a2)) AS path
-RETURN
-  [n IN nodes(path) | {id: n.id, labels: labels(n), risk_score: n.risk_score}] AS path_nodes,
-  [r IN relationships(path) | {type: type(r), properties: properties(r)}]      AS path_rels,
-  length(path) AS hop_count
-"""
-    try:
-        result = graph.query(
-            cypher,
-            {
-                "from_account_id": from_account_id,
-                "to_account_id": to_account_id,
-            },
+        # Fetch node properties
+        props_result = graph.query(
+            f"MATCH (n:{label} {{id: $id}}) RETURN properties(n) AS props",
+            {"id": entity_id},
         )
-        rows = _rows_to_dicts(result)
-        return rows[0] if rows else {}
+        props_rows = props_result.result_set if props_result and props_result.result_set else []
+        node_props = props_rows[0][0] if props_rows else {}
+        if hasattr(node_props, "properties"):
+            node_props = node_props.properties
+        if not isinstance(node_props, dict):
+            node_props = {}
+
+        # Fetch neighbours
+        nb_result = graph.query(
+            f"""MATCH (n:{label} {{id: $id}})-[r]-(nb)
+RETURN type(r) AS rel, labels(nb) AS nb_labels, nb.id AS nb_id,
+       nb.name AS nb_name, properties(r) AS rel_props""",
+            {"id": entity_id},
+        )
+        nb_rows = _rows_to_dicts(nb_result)
+        neighbors = []
+        for row in nb_rows:
+            nb_label_list = row.get("nb_labels", [])
+            neighbors.append({
+                "rel": row.get("rel", ""),
+                "label": nb_label_list[0] if nb_label_list else "",
+                "id": row.get("nb_id", ""),
+                "name": row.get("nb_name", ""),
+                "rel_props": row.get("rel_props", {}),
+            })
+
+        return {"node": node_props, "neighbors": neighbors}
     except Exception as exc:
-        print(f"[queries] query_transaction_path warning: {exc}")
-        return {}
+        print(f"[queries] get_entity_profile warning: {exc}")
+        return {"node": {}, "neighbors": []}
 
 
 # ---------------------------------------------------------------------------
-# 4. Past investigation sessions for an account
+# 2. Expand neighbourhood (variable-depth traversal)
 # ---------------------------------------------------------------------------
 
-def query_investigation_history(graph, account_id: str) -> list:
-    """Return the 20 most-recent agent sessions that investigated this account."""
-    cypher = """
-MATCH (s:AgentSession)-[:INVESTIGATED]->(a:Account {id: $account_id})
-RETURN
-  s.session_id  AS session_id,
-  s.started_at  AS started_at,
-  s.query       AS query,
-  s.conclusion  AS conclusion,
-  s.tools_used  AS tools_used
-ORDER BY s.started_at DESC
-LIMIT 20
-"""
+def expand_neighborhood(graph, entity_id: str, depth: int = 2, rel_types: list = None) -> dict:
+    """Return all nodes and edges reachable within *depth* hops.
+
+    Use this tool when you need to map the wider network around an entity.
+    Returns Cytoscape-compatible {nodes, edges} format.
+
+    rel_types: optional list of relationship type strings to filter traversal.
+    """
+    depth = max(1, min(int(depth), 6))  # guard bounds
+
+    rel_filter = ""
+    if rel_types:
+        rel_filter = ":" + "|".join(rel_types)
+
+    cypher = f"""MATCH (n {{id: $id}})-[r{rel_filter}*1..{depth}]-(nb)
+WHERE nb.id <> $id
+WITH DISTINCT nb, r
+RETURN nb.id AS nb_id, labels(nb) AS nb_labels, properties(nb) AS nb_props,
+       [rel IN r | [startNode(rel).id, type(rel), endNode(rel).id, properties(rel)]] AS edge_list"""
+
     try:
-        result = graph.query(cypher, {"account_id": account_id})
-        return _rows_to_dicts(result)
+        result = graph.query(cypher, {"id": entity_id})
+        rows = result.result_set if result and result.result_set else []
+
+        nodes_seen = {}
+        edges_seen = {}
+
+        # Always include the seed node
+        seed_props_r = graph.query(
+            "MATCH (n {id: $id}) RETURN labels(n) AS lbs, properties(n) AS props",
+            {"id": entity_id},
+        )
+        if seed_props_r and seed_props_r.result_set:
+            seed_row = seed_props_r.result_set[0]
+            seed_lbs = seed_row[0] if seed_row[0] else []
+            seed_ps = seed_row[1] if seed_row[1] else {}
+            if hasattr(seed_ps, "properties"):
+                seed_ps = seed_ps.properties
+            nodes_seen[entity_id] = {
+                "data": {
+                    "id": entity_id,
+                    "label": seed_lbs[0] if seed_lbs else "",
+                    "properties": seed_ps if isinstance(seed_ps, dict) else {},
+                }
+            }
+
+        for row in rows:
+            nb_id = row[0]
+            nb_labels = row[1] or []
+            nb_props = row[2] or {}
+            if hasattr(nb_props, "properties"):
+                nb_props = nb_props.properties
+            edge_list = row[3] or []
+
+            if nb_id and nb_id not in nodes_seen:
+                nodes_seen[nb_id] = {
+                    "data": {
+                        "id": nb_id,
+                        "label": nb_labels[0] if nb_labels else "",
+                        "properties": nb_props if isinstance(nb_props, dict) else {},
+                    }
+                }
+
+            for edge in edge_list:
+                if not edge or len(edge) < 3:
+                    continue
+                src, rel_type, tgt = edge[0], edge[1], edge[2]
+                edge_props = edge[3] if len(edge) > 3 else {}
+                if hasattr(edge_props, "properties"):
+                    edge_props = edge_props.properties
+                edge_key = f"{src}-{rel_type}-{tgt}"
+                if edge_key not in edges_seen:
+                    edges_seen[edge_key] = {
+                        "data": {
+                            "id": edge_key,
+                            "source": src,
+                            "target": tgt,
+                            "type": rel_type,
+                            "properties": edge_props if isinstance(edge_props, dict) else {},
+                        }
+                    }
+
+        return {
+            "nodes": list(nodes_seen.values()),
+            "edges": list(edges_seen.values()),
+        }
     except Exception as exc:
-        print(f"[queries] query_investigation_history warning: {exc}")
+        print(f"[queries] expand_neighborhood warning: {exc}")
+        return {"nodes": [], "edges": []}
+
+
+# ---------------------------------------------------------------------------
+# 3. Find paths between two entities
+# ---------------------------------------------------------------------------
+
+def find_paths(graph, a: str, b: str, max_hops: int = 6) -> list:
+    """Return the shortest path between two entities.
+
+    Use this tool when you need to prove whether and how two entities are
+    connected. Returns a list of path dicts with node IDs and relationship types.
+    Returns [] when no path exists.
+    """
+    max_hops = max(1, min(int(max_hops), 10))
+    cypher = f"""MATCH (x {{id: $a}}),(y {{id: $b}})
+WITH shortestPath((x)-[*1..{max_hops}]-(y)) AS p
+RETURN [n IN nodes(p) | n.id] AS ids,
+       [r IN relationships(p) | type(r)] AS rels,
+       length(p) AS hops"""
+    try:
+        result = graph.query(cypher, {"a": a, "b": b})
+        rows = _rows_to_dicts(result)
+        paths = []
+        for row in rows:
+            if row.get("ids") is None:
+                continue
+            paths.append({
+                "ids": row.get("ids", []),
+                "rels": row.get("rels", []),
+                "hops": row.get("hops", 0),
+            })
+        return paths
+    except Exception as exc:
+        print(f"[queries] find_paths warning: {exc}")
         return []
 
 
 # ---------------------------------------------------------------------------
-# 5. Flag an account
+# 4. Shared attributes (bridge nodes)
 # ---------------------------------------------------------------------------
 
-def query_flag_account(graph, account_id: str, reason: str) -> dict:
-    """Set an account's status to 'flagged' and record the reason.
-    Returns the updated account info or {} on failure."""
-    cypher = """
-MATCH (a:Account {id: $account_id})
-SET
-  a.status      = 'flagged',
-  a.flag_reason = $reason,
-  a.flagged_at  = timestamp(),
-  a.flagged_by  = 'agent',
-  a.risk_score  = CASE WHEN a.risk_score < 0.8 THEN 0.8 ELSE a.risk_score END
-RETURN
-  a.id          AS account_id,
-  a.status      AS new_status,
-  a.flag_reason AS reason,
-  a.flagged_at  AS flagged_at
-"""
+def shared_attributes(graph, a: str, b: str) -> list:
+    """Find bridge nodes that connect two entities within 2 hops each.
+
+    Use this tool when you need to understand WHY two entities look linked.
+    Returns shared devices, IPs, addresses, or other bridge nodes.
+    """
+    cypher = """MATCH (x {id: $a})-[*1..2]-(bridge)-[*1..2]-(y {id: $b})
+WHERE bridge.id <> $a AND bridge.id <> $b
+RETURN DISTINCT bridge.id AS bridge_id, labels(bridge) AS bridge_labels,
+       bridge.name AS bridge_name, bridge.risk_score AS bridge_risk"""
     try:
-        result = graph.query(cypher, {"account_id": account_id, "reason": reason})
-        rows = _rows_to_dicts(result)
-        return rows[0] if rows else {}
-    except Exception as exc:
-        print(f"[queries] query_flag_account warning: {exc}")
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# 6. Risk neighbours of an account
-# ---------------------------------------------------------------------------
-
-def query_risk_neighbors(graph, account_id: str) -> list:
-    """Return all direct neighbours of an account with their risk scores."""
-    cypher = """
-MATCH (a:Account {id: $account_id})-[r]-(neighbor)
-RETURN
-  neighbor.id         AS neighbor_id,
-  labels(neighbor)    AS neighbor_labels,
-  type(r)             AS relationship_type,
-  neighbor.risk_score AS risk_score,
-  neighbor.status     AS status,
-  properties(r)       AS rel_properties
-ORDER BY neighbor.risk_score DESC
-"""
-    try:
-        result = graph.query(cypher, {"account_id": account_id})
+        result = graph.query(cypher, {"a": a, "b": b})
         return _rows_to_dicts(result)
     except Exception as exc:
-        print(f"[queries] query_risk_neighbors warning: {exc}")
+        print(f"[queries] shared_attributes warning: {exc}")
         return []
 
 
 # ---------------------------------------------------------------------------
-# 7. Persist an agent session to the graph
+# 5. Detect communities (BFS ring detection)
+# ---------------------------------------------------------------------------
+
+def detect_communities(graph, seed_id: str) -> dict:
+    """Identify a community of entities connected to the seed within 4 hops.
+
+    Use this tool when you suspect a fraud ring and need to enumerate its members.
+    Writes community_id back to each member node.
+    """
+    community_id = "COM_" + seed_id
+    cypher = """MATCH (seed {id: $id})-[*1..4]-(member)
+WHERE member.id <> $id
+RETURN DISTINCT member.id AS mid, labels(member) AS mlabels,
+       member.risk_score AS mrisk, member.community_id AS mcommunity"""
+    try:
+        result = graph.query(cypher, {"id": seed_id})
+        rows = _rows_to_dicts(result)
+
+        members = []
+        for row in rows:
+            mid = row.get("mid")
+            if not mid:
+                continue
+            members.append({
+                "id": mid,
+                "labels": row.get("mlabels", []),
+                "risk_score": row.get("mrisk"),
+            })
+            # Write back community_id
+            try:
+                graph.query(
+                    "MATCH (m {id: $mid}) SET m.community_id = $cid, m.community_computed_at = timestamp()",
+                    {"mid": mid, "cid": community_id},
+                )
+            except Exception as wb_exc:
+                print(f"[queries] detect_communities write-back warning for {mid}: {wb_exc}")
+
+        return {
+            "community_id": community_id,
+            "members": members,
+            "size": len(members),
+        }
+    except Exception as exc:
+        print(f"[queries] detect_communities warning: {exc}")
+        return {"community_id": community_id, "members": [], "size": 0}
+
+
+# ---------------------------------------------------------------------------
+# 6. Rank central nodes by degree
+# ---------------------------------------------------------------------------
+
+def rank_central_nodes(graph, node_ids: list) -> list:
+    """Rank a set of nodes by their degree (connection count) as a centrality proxy.
+
+    Use this tool to identify the kingpin — the highest-centrality node in a cluster.
+    Returns nodes sorted descending by degree.
+    """
+    if not node_ids:
+        return []
+    ranked = []
+    for nid in node_ids:
+        try:
+            result = graph.query(
+                "MATCH (n {id: $id})-[r]-() RETURN n.id AS nid, labels(n) AS nlabels, count(r) AS degree, n.risk_score AS risk_score",
+                {"id": nid},
+            )
+            rows = _rows_to_dicts(result)
+            if rows:
+                row = rows[0]
+                nlabels = row.get("nlabels", [])
+                ranked.append({
+                    "id": row.get("nid", nid),
+                    "label": nlabels[0] if nlabels else "",
+                    "degree": row.get("degree", 0),
+                    "risk_score": row.get("risk_score"),
+                })
+        except Exception as exc:
+            print(f"[queries] rank_central_nodes warning for {nid}: {exc}")
+
+    ranked.sort(key=lambda x: x.get("degree", 0), reverse=True)
+    return ranked
+
+
+# ---------------------------------------------------------------------------
+# 7. Trace money flow
+# ---------------------------------------------------------------------------
+
+def trace_money_flow(graph, account_id: str, window_seconds: int = 86400) -> dict:
+    """Trace inbound and outbound transactions within a time window.
+
+    Use this tool to detect mule chains, rapid pass-through, or structuring patterns.
+    window_seconds defaults to 86400 (24 hours).
+    """
+    start_ts = int(time.time()) - int(window_seconds)
+    try:
+        # Outbound
+        out_result = graph.query(
+            """MATCH (a:Account {id: $id})-[:SENT]->(t:Transaction)-[:TO]->(b:Account)
+WHERE t.ts >= $start_ts
+RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS dest""",
+            {"id": account_id, "start_ts": start_ts},
+        )
+        outbound = _rows_to_dicts(out_result)
+
+        # Inbound
+        in_result = graph.query(
+            """MATCH (b:Account)-[:SENT]->(t:Transaction)-[:TO]->(a:Account {id: $id})
+WHERE t.ts >= $start_ts
+RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS src""",
+            {"id": account_id, "start_ts": start_ts},
+        )
+        inbound = _rows_to_dicts(in_result)
+
+        inbound_total = sum(float(r.get("amount") or 0) for r in inbound)
+        outbound_total = sum(float(r.get("amount") or 0) for r in outbound)
+        net_flow = inbound_total - outbound_total
+        total_txns = len(inbound) + len(outbound)
+        velocity_score = min(1.0, total_txns / 10.0)
+
+        return {
+            "account_id": account_id,
+            "inbound": inbound,
+            "outbound": outbound,
+            "net_flow": net_flow,
+            "velocity_score": velocity_score,
+        }
+    except Exception as exc:
+        print(f"[queries] trace_money_flow warning: {exc}")
+        return {"account_id": account_id, "inbound": [], "outbound": [], "net_flow": 0, "velocity_score": 0}
+
+
+# ---------------------------------------------------------------------------
+# 8. Score a cluster
+# ---------------------------------------------------------------------------
+
+def score_cluster(graph, community_id: str) -> dict:
+    """Compute an aggregate risk score for a community/cluster.
+
+    Use this tool after detect_communities to quantify how risky the ring is.
+    Combines average risk, shared devices, shared addresses, and flagged transactions.
+    """
+    try:
+        members_r = graph.query(
+            "MATCH (n {community_id: $cid}) RETURN n.id AS nid, labels(n) AS nlabels, n.risk_score AS risk_score",
+            {"cid": community_id},
+        )
+        member_rows = _rows_to_dicts(members_r)
+        member_count = len(member_rows)
+
+        risks = [float(r.get("risk_score") or 0) for r in member_rows]
+        avg_risk = sum(risks) / max(1, len(risks))
+        max_risk = max(risks) if risks else 0.0
+
+        # Shared devices
+        dev_r = graph.query(
+            "MATCH (c:Customer {community_id: $cid})-[:USED_DEVICE]->(d:Device) RETURN count(DISTINCT d) AS shared_devs",
+            {"cid": community_id},
+        )
+        shared_devs = dev_r.result_set[0][0] if dev_r and dev_r.result_set else 0
+
+        # Shared addresses
+        addr_r = graph.query(
+            "MATCH (c:Customer {community_id: $cid})-[:LIVES_AT]->(a:Address) RETURN count(DISTINCT a) AS shared_addrs",
+            {"cid": community_id},
+        )
+        shared_addrs = addr_r.result_set[0][0] if addr_r and addr_r.result_set else 0
+
+        # Flagged transactions
+        flag_r = graph.query(
+            "MATCH (c:Customer {community_id: $cid})-[:OWNS]->(:Account)-[:SENT]->(t:Transaction) WHERE t.status='flagged' RETURN count(t) AS flagged_txns",
+            {"cid": community_id},
+        )
+        flagged_txn_count = flag_r.result_set[0][0] if flag_r and flag_r.result_set else 0
+
+        cluster_score = min(
+            1.0,
+            avg_risk * 0.4
+            + (shared_devs / max(1, member_count)) * 0.3
+            + (flagged_txn_count / max(1, member_count)) * 0.3,
+        )
+
+        return {
+            "community_id": community_id,
+            "member_count": member_count,
+            "avg_risk": avg_risk,
+            "max_risk": max_risk,
+            "shared_devices": shared_devs,
+            "shared_addresses": shared_addrs,
+            "flagged_transactions": flagged_txn_count,
+            "cluster_score": cluster_score,
+        }
+    except Exception as exc:
+        print(f"[queries] score_cluster warning: {exc}")
+        return {"community_id": community_id, "cluster_score": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# 9. Freeze account (action tool)
+# ---------------------------------------------------------------------------
+
+def freeze_account(graph, account_id: str, reason: str, evidence_ids: list, dry_run: bool = True) -> dict:
+    """Freeze an account and create an auditable Action node.
+
+    Use this tool when investigation confirms an account should be frozen.
+    Required: reason (str), evidence_ids (list[str]).
+    dry_run=True by default — set False to apply the freeze.
+    """
+    action_id = "ACT_" + str(uuid.uuid4())[:8]
+    try:
+        if not dry_run:
+            graph.query(
+                "MATCH (a:Account {id: $id}) SET a.status = 'frozen'",
+                {"id": account_id},
+            )
+
+        graph.query(
+            """CREATE (act:Action {
+                id: $action_id,
+                type: 'freeze_account',
+                dry_run: $dry_run,
+                reason: $reason,
+                ts: timestamp()
+            })""",
+            {"action_id": action_id, "dry_run": dry_run, "reason": reason},
+        )
+
+        graph.query(
+            """MATCH (act:Action {id: $action_id}), (a:Account {id: $account_id})
+CREATE (act)-[:TARGETS]->(a)""",
+            {"action_id": action_id, "account_id": account_id},
+        )
+
+        for ev_id in (evidence_ids or []):
+            try:
+                graph.query(
+                    """MATCH (act:Action {id: $action_id}), (ev:Evidence {id: $ev_id})
+CREATE (act)-[:USES_EVIDENCE]->(ev)""",
+                    {"action_id": action_id, "ev_id": ev_id},
+                )
+            except Exception as ev_exc:
+                print(f"[queries] freeze_account evidence link warning: {ev_exc}")
+
+        return {
+            "action_id": action_id,
+            "type": "freeze_account",
+            "dry_run": dry_run,
+            "account_id": account_id,
+            "status": "frozen" if not dry_run else "dry_run",
+        }
+    except Exception as exc:
+        print(f"[queries] freeze_account warning: {exc}")
+        return {"action_id": action_id, "type": "freeze_account", "dry_run": dry_run, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# 10. Open a case
+# ---------------------------------------------------------------------------
+
+def open_case(graph, alert_ids: list, reason: str, evidence_ids: list) -> dict:
+    """Open a new investigation Case and link it to alerts and evidence.
+
+    Use this tool when you have enough signals to start a formal case.
+    Required: reason (str), evidence_ids (list[str]).
+    """
+    case_id = "CASE_" + str(uuid.uuid4())[:8]
+    try:
+        graph.query(
+            """CREATE (c:Case {
+                id: $case_id,
+                status: 'open',
+                opened_at: timestamp(),
+                summary: $reason
+            })""",
+            {"case_id": case_id, "reason": reason},
+        )
+
+        for alert_id in (alert_ids or []):
+            try:
+                graph.query(
+                    """MATCH (c:Case {id: $case_id}), (al:Alert {id: $alert_id})
+CREATE (c)-[:CONTAINS]->(al)""",
+                    {"case_id": case_id, "alert_id": alert_id},
+                )
+            except Exception as al_exc:
+                print(f"[queries] open_case alert link warning: {al_exc}")
+
+        if evidence_ids:
+            ev_id = "EV_" + str(uuid.uuid4())[:8]
+            ev_entities = json_safe_list(evidence_ids)
+            graph.query(
+                """CREATE (ev:Evidence {
+                    id: $ev_id,
+                    kind: 'case_summary',
+                    summary: $reason,
+                    entities: $entities,
+                    payload: '{}'
+                })""",
+                {"ev_id": ev_id, "reason": reason, "entities": ev_entities},
+            )
+            graph.query(
+                """MATCH (c:Case {id: $case_id}), (ev:Evidence {id: $ev_id})
+CREATE (c)-[:HAS_EVIDENCE]->(ev)""",
+                {"case_id": case_id, "ev_id": ev_id},
+            )
+
+        return {"case_id": case_id, "status": "open", "alert_count": len(alert_ids or [])}
+    except Exception as exc:
+        print(f"[queries] open_case warning: {exc}")
+        return {"case_id": case_id, "status": "error", "error": str(exc)}
+
+
+def json_safe_list(lst):
+    """Ensure list contains only strings for graph storage."""
+    return [str(x) for x in lst] if lst else []
+
+
+# ---------------------------------------------------------------------------
+# 11. Flag a cluster
+# ---------------------------------------------------------------------------
+
+def flag_cluster(graph, community_id: str, reason: str, evidence_ids: list, dry_run: bool = True) -> dict:
+    """Raise risk scores for all accounts in a community cluster.
+
+    Use this tool when the whole ring is confirmed suspicious.
+    Required: reason (str), evidence_ids (list[str]).
+    dry_run=True by default — set False to apply score increases.
+    """
+    action_id = "ACT_" + str(uuid.uuid4())[:8]
+    try:
+        acct_r = graph.query(
+            "MATCH (c:Customer {community_id: $cid})-[:OWNS]->(a:Account) RETURN DISTINCT a.id AS acct_id, a.risk_score AS risk_score",
+            {"cid": community_id},
+        )
+        acct_rows = _rows_to_dicts(acct_r)
+        members_flagged = len(acct_rows)
+
+        if not dry_run:
+            for row in acct_rows:
+                acct_id = row.get("acct_id")
+                if acct_id:
+                    try:
+                        graph.query(
+                            "MATCH (a:Account {id: $id}) SET a.risk_score = CASE WHEN a.risk_score + 0.2 > 1.0 THEN 1.0 ELSE a.risk_score + 0.2 END",
+                            {"id": acct_id},
+                        )
+                    except Exception as upd_exc:
+                        print(f"[queries] flag_cluster update warning for {acct_id}: {upd_exc}")
+
+        graph.query(
+            """CREATE (act:Action {
+                id: $action_id,
+                type: 'flag_cluster',
+                community_id: $community_id,
+                dry_run: $dry_run,
+                reason: $reason,
+                ts: timestamp()
+            })""",
+            {"action_id": action_id, "community_id": community_id, "dry_run": dry_run, "reason": reason},
+        )
+
+        return {
+            "action_id": action_id,
+            "community_id": community_id,
+            "members_flagged": members_flagged,
+            "dry_run": dry_run,
+        }
+    except Exception as exc:
+        print(f"[queries] flag_cluster warning: {exc}")
+        return {"action_id": action_id, "community_id": community_id, "members_flagged": 0, "dry_run": dry_run, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# 12. Escalate to human
+# ---------------------------------------------------------------------------
+
+def escalate_to_human(graph, case_id: str, reason: str, evidence_ids: list) -> dict:
+    """Escalate a case to a human analyst and create an auditable Action node.
+
+    Use this tool when the agent cannot make a high-confidence decision alone.
+    Required: reason (str), evidence_ids (list[str]).
+    """
+    action_id = "ACT_" + str(uuid.uuid4())[:8]
+    try:
+        graph.query(
+            """CREATE (act:Action {
+                id: $action_id,
+                type: 'escalate_to_human',
+                reason: $reason,
+                ts: timestamp()
+            })""",
+            {"action_id": action_id, "reason": reason},
+        )
+
+        graph.query(
+            """MATCH (act:Action {id: $action_id}), (c:Case {id: $case_id})
+CREATE (act)-[:TARGETS]->(c)""",
+            {"action_id": action_id, "case_id": case_id},
+        )
+
+        for ev_id in (evidence_ids or []):
+            try:
+                graph.query(
+                    """MATCH (act:Action {id: $action_id}), (ev:Evidence {id: $ev_id})
+CREATE (act)-[:USES_EVIDENCE]->(ev)""",
+                    {"action_id": action_id, "ev_id": ev_id},
+                )
+            except Exception as ev_exc:
+                print(f"[queries] escalate_to_human evidence link warning: {ev_exc}")
+
+        return {"action_id": action_id, "case_id": case_id, "reason": reason}
+    except Exception as exc:
+        print(f"[queries] escalate_to_human warning: {exc}")
+        return {"action_id": action_id, "case_id": case_id, "reason": reason, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# 13. Persist an agent session to the graph (kept for memory.py)
 # ---------------------------------------------------------------------------
 
 def persist_session_to_graph(graph, session_data: dict):
@@ -222,7 +688,6 @@ def persist_session_to_graph(graph, session_data: dict):
         flagged_ids     list[str]
         flag_reason     str
     """
-    # --- Step 1: Always create the session node --------------------------
     create_cypher = """
 CREATE (s:AgentSession {
   session_id:  $session_id,
@@ -248,11 +713,10 @@ RETURN s.session_id AS persisted_session
         graph.query(create_cypher, params)
     except Exception as exc:
         print(f"[queries] persist_session_to_graph – CREATE node warning: {exc}")
-        return  # Cannot proceed without the session node
+        return
 
     session_id = params["session_id"]
 
-    # --- Step 2: Link to investigated accounts (only when list is non-empty)
     investigated_ids = session_data.get("investigated_ids") or []
     if investigated_ids:
         inv_cypher = """
@@ -264,15 +728,11 @@ UNWIND $investigated_ids AS acc_id
         try:
             graph.query(
                 inv_cypher,
-                {
-                    "session_id":      session_id,
-                    "investigated_ids": investigated_ids,
-                },
+                {"session_id": session_id, "investigated_ids": investigated_ids},
             )
         except Exception as exc:
             print(f"[queries] persist_session_to_graph – INVESTIGATED link warning: {exc}")
 
-    # --- Step 3: Link to flagged accounts (only when list is non-empty) ---
     flagged_ids = session_data.get("flagged_ids") or []
     if flagged_ids:
         flag_cypher = """
