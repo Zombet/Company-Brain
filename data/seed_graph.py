@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'backend'))
@@ -463,9 +463,9 @@ def create_bridge_transactions(graph):
             t,
         )
     edges = [
-        # ring → kingpin
+        # ring -> kingpin
         ("A_nina1",  "T_bridge1", "A_kingpin1", 15000, 1728020000),
-        # mule chain → kingpin
+        # mule chain -> kingpin
         ("A_john1",  "T_bridge2", "A_kingpin1", 12000, 1728006000),
     ]
     for src, tid, dst, amt, ts in edges:
@@ -476,7 +476,7 @@ def create_bridge_transactions(graph):
             "CREATE (s)-[:SENT {amount:$amt, ts:$ts}]->(t)-[:TO]->(d)",
             {"src": src, "tid": tid, "dst": dst, "amt": amt, "ts": ts},
         )
-    print("[seed] Created bridge transactions (ring + mule → kingpin).")
+    print("[seed] Created bridge transactions (ring + mule -> kingpin).")
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +484,7 @@ def create_bridge_transactions(graph):
 # ---------------------------------------------------------------------------
 
 def create_customer_relationships(graph):
-    # USED_DEVICE — ring half 1 → D_ring1, ring half 2 → D_ring2
+    # USED_DEVICE — ring half 1 -> D_ring1, ring half 2 -> D_ring2
     used_device = [
         ("C_kunal",  "D_ring1", 1727500000, 1728020000),
         ("C_aryan",  "D_ring1", 1727510000, 1728015000),
@@ -530,7 +530,7 @@ def create_customer_relationships(graph):
         )
     print(f"[seed] Created {len(lives_at)} LIVES_AT relationships.")
 
-    # LOGGED_IN_FROM — each customer → their own IP
+    # LOGGED_IN_FROM — each customer -> their own IP
     logged_in = [
         ("C_kunal",   "IP_kunal"),
         ("C_aryan",   "IP_aryan"),
@@ -560,7 +560,7 @@ def create_customer_relationships(graph):
         )
     print(f"[seed] Created {len(logged_in)} LOGGED_IN_FROM relationships.")
 
-    # HAS_PHONE — each customer → their Phone node
+    # HAS_PHONE — each customer -> their Phone node
     has_phone = [
         ("C_kunal",   "PH_kunal"),
         ("C_aryan",   "PH_aryan"),
@@ -644,7 +644,7 @@ def create_cases_and_decisions(graph):
     # ---- CASE_002: Mule Chain ----
     graph.query(
         "CREATE (:Case {id:'CASE_002', status:'open', opened_at:1728005400, "
-        "summary:'Suspected mule chain: rapid pass-through A_john1 → A_cashout_sink'})"
+        "summary:'Suspected mule chain: rapid pass-through A_john1 -> A_cashout_sink'})"
     )
     graph.query(
         "MATCH (ca:Case {id:'CASE_002'}), (al:Alert {id:'AL_mule_alert'}) "
@@ -741,10 +741,12 @@ if __name__ == '__main__':
     print("[seed] Creating Scenario 5 — Bridge/Kingpin transactions ...")
     create_bridge_transactions(graph)
 
-    print("[seed] Creating customer → bridge-node relationships ...")
+    print("[seed] Creating customer -> bridge-node relationships ...")
     create_customer_relationships(graph)
 
     print("[seed] Creating agent/audit layer (cases, evidence, decisions, actions) ...")
     create_cases_and_decisions(graph)
 
     print_summary(graph)
+
+
