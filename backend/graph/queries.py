@@ -118,11 +118,11 @@ def expand_neighborhood(graph, entity_id: str, depth: int = 2, rel_types: list =
     if rel_types:
         rel_filter = ":" + "|".join(rel_types)
 
-    cypher = f"""MATCH (n {{id: $id}})-[r{rel_filter}*1..{depth}]-(nb)
+    cypher = f"""MATCH path = (n {{id: $id}})-[{rel_filter}*1..{depth}]-(nb)
 WHERE nb.id <> $id
-WITH DISTINCT nb, r
+WITH nb, relationships(path) AS rels, nodes(path) AS pnodes
 RETURN nb.id AS nb_id, labels(nb) AS nb_labels, properties(nb) AS nb_props,
-       [rel IN r | [startNode(rel).id, type(rel), endNode(rel).id, properties(rel)]] AS edge_list"""
+       [rel IN rels | [startNode(rel).id, type(rel), endNode(rel).id, properties(rel)]] AS edge_list"""
 
     try:
         result = graph.query(cypher, {"id": entity_id})
@@ -257,13 +257,13 @@ RETURN DISTINCT bridge.id AS bridge_id, labels(bridge) AS bridge_labels,
 # ---------------------------------------------------------------------------
 
 def detect_communities(graph, seed_id: str) -> dict:
-    """Identify a community of entities connected to the seed within 4 hops.
+    """Identify a community of entities connected to the seed within 8 hops.
 
     Use this tool when you suspect a fraud ring and need to enumerate its members.
     Writes community_id back to each member node.
     """
     community_id = "COM_" + seed_id
-    cypher = """MATCH (seed {id: $id})-[*1..4]-(member)
+    cypher = """MATCH (seed {id: $id})-[*1..8]-(member)
 WHERE member.id <> $id
 RETURN DISTINCT member.id AS mid, labels(member) AS mlabels,
        member.risk_score AS mrisk, member.community_id AS mcommunity"""
