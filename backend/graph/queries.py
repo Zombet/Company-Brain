@@ -260,35 +260,59 @@ def detect_communities(graph, seed_id: str) -> dict:
     """Identify a community of entities connected to the seed within 8 hops.
 
     Use this tool when you suspect a fraud ring and need to enumerate its members.
-    Writes community_id back to each member node.
+    Writes community_id back to Customer and Account nodes only (not bridge nodes).
     """
     community_id = "COM_" + seed_id
+
+    # Step 1: traverse and collect members (read-only)
     cypher = """MATCH (seed {id: $id})-[*1..8]-(member)
 WHERE member.id <> $id
 RETURN DISTINCT member.id AS mid, labels(member) AS mlabels,
-       member.risk_score AS mrisk, member.community_id AS mcommunity"""
+       member.risk_score AS mrisk"""
     try:
         result = graph.query(cypher, {"id": seed_id})
         rows = _rows_to_dicts(result)
 
         members = []
+        customer_ids = []
+        account_ids = []
         for row in rows:
             mid = row.get("mid")
             if not mid:
                 continue
+            mlabels = row.get("mlabels") or []
             members.append({
                 "id": mid,
-                "labels": row.get("mlabels", []),
+                "labels": mlabels,
                 "risk_score": row.get("mrisk"),
             })
-            # Write back community_id
+            # Collect IDs for batch write-back (only meaningful node types)
+            if "Customer" in mlabels:
+                customer_ids.append(mid)
+            elif "Account" in mlabels:
+                account_ids.append(mid)
+
+        # Step 2: batch write-back using UNWIND — one query per node type
+        # This avoids the per-node loop that crashes FalkorDB
+        if customer_ids:
             try:
                 graph.query(
-                    "MATCH (m {id: $mid}) SET m.community_id = $cid, m.community_computed_at = timestamp()",
-                    {"mid": mid, "cid": community_id},
+                    "UNWIND $ids AS mid MATCH (m:Customer {id: mid}) "
+                    "SET m.community_id = $cid, m.community_computed_at = timestamp()",
+                    {"ids": customer_ids, "cid": community_id},
                 )
             except Exception as wb_exc:
-                print(f"[queries] detect_communities write-back warning for {mid}: {wb_exc}")
+                print(f"[queries] detect_communities Customer write-back warning: {wb_exc}")
+
+        if account_ids:
+            try:
+                graph.query(
+                    "UNWIND $ids AS mid MATCH (m:Account {id: mid}) "
+                    "SET m.community_id = $cid, m.community_computed_at = timestamp()",
+                    {"ids": account_ids, "cid": community_id},
+                )
+            except Exception as wb_exc:
+                print(f"[queries] detect_communities Account write-back warning: {wb_exc}")
 
         return {
             "community_id": community_id,
@@ -312,28 +336,28 @@ def rank_central_nodes(graph, node_ids: list) -> list:
     """
     if not node_ids:
         return []
-    ranked = []
-    for nid in node_ids:
-        try:
-            result = graph.query(
-                "MATCH (n {id: $id})-[r]-() RETURN n.id AS nid, labels(n) AS nlabels, count(r) AS degree, n.risk_score AS risk_score",
-                {"id": nid},
-            )
-            rows = _rows_to_dicts(result)
-            if rows:
-                row = rows[0]
-                nlabels = row.get("nlabels", [])
-                ranked.append({
-                    "id": row.get("nid", nid),
-                    "label": nlabels[0] if nlabels else "",
-                    "degree": row.get("degree", 0),
-                    "risk_score": row.get("risk_score"),
-                })
-        except Exception as exc:
-            print(f"[queries] rank_central_nodes warning for {nid}: {exc}")
-
-    ranked.sort(key=lambda x: x.get("degree", 0), reverse=True)
-    return ranked
+    # Batch all IDs in a single UNWIND query instead of N individual queries
+    try:
+        result = graph.query(
+            "UNWIND $ids AS nid MATCH (n {id: nid})-[r]-() "
+            "RETURN n.id AS nid, labels(n) AS nlabels, count(r) AS degree, n.risk_score AS risk_score",
+            {"ids": list(node_ids)},
+        )
+        rows = _rows_to_dicts(result)
+        ranked = []
+        for row in rows:
+            nlabels = row.get("nlabels") or []
+            ranked.append({
+                "id": row.get("nid", ""),
+                "label": nlabels[0] if nlabels else "",
+                "degree": row.get("degree", 0),
+                "risk_score": row.get("risk_score"),
+            })
+        ranked.sort(key=lambda x: x.get("degree", 0), reverse=True)
+        return ranked
+    except Exception as exc:
+        print(f"[queries] rank_central_nodes warning: {exc}")
+        return []
 
 
 # ---------------------------------------------------------------------------
