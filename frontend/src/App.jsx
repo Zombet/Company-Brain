@@ -3,19 +3,16 @@ import ChatPanel from './components/ChatPanel'
 import GraphPanel from './components/GraphPanel'
 import { useAgent } from './hooks/useAgent'
 import { useGraph } from './hooks/useGraph'
-import { getOverview } from './api/client'
 
 const EDGE_LABEL_MAP = {
   SENT: 'SND', TO: '→', OWNS: 'OWN', USED_DEVICE: 'USED', LOGGED_IN_FROM: 'IP',
-  LIVES_AT: 'AT', HAS_PHONE: 'PH', HAS_EMAIL: '@', TRIGGERED_BY: 'TRIG',
+  LIVES_AT: 'AT', HAS_PHONE: 'PH', HAS_EMAIL: '@', AT: '@', TRIGGERED_BY: 'TRIG',
   CONTAINS: 'HAS', HAS_EVIDENCE: 'EV', ABOUT: 'RE', EVIDENCED_BY: 'EV',
   LED_TO: '→', TARGETS: '→',
 }
 
-// Mirrors the ID-prefix convention from queries.py so we can guess node labels
-// when the backend doesn't return them explicitly.
 function _labelFromId(id) {
-  if (!id) return null
+  if (!id) return 'Node'
   if (id.startsWith('C_')) return 'Customer'
   if (id.startsWith('A_')) return 'Account'
   if (id.startsWith('T_')) return 'Transaction'
@@ -29,39 +26,180 @@ function _labelFromId(id) {
   if (id.startsWith('EV_')) return 'Evidence'
   if (id.startsWith('DEC_')) return 'Decision'
   if (id.startsWith('ACT_')) return 'Action'
-  return null
+  return 'Node'
 }
 
-function makeNode(id, label, props = {}) {
+function makeNode(id, label, props = {}, highlighted = false) {
+  if (!id) return null
   return {
     data: {
-      id,
-      label,
-      nodeLabel: label,
+      id: String(id),
+      label: label || _labelFromId(id),
+      nodeLabel: label || _labelFromId(id),
       id_short: String(id).substring(0, 12),
+      risk_score: props.risk_score ?? null,
+      status: props.status ?? null,
       ...props,
-    }
+    },
+    classes: highlighted ? 'highlighted' : undefined,
   }
 }
 
-function makeEdge(source, target, type, extraProps = {}) {
+function makeEdge(source, target, type, highlighted = false) {
+  if (!source || !target) return null
+  const t = type || 'REL'
   return {
     data: {
-      id: `${source}-${target}-${type}`,
-      source,
-      target,
-      label: type,
-      shortLabel: EDGE_LABEL_MAP[type] || type,
-      ...extraProps,
+      id: `${source}-${target}-${t}`,
+      source: String(source),
+      target: String(target),
+      label: t,
+      shortLabel: EDGE_LABEL_MAP[t] || t,
+    },
+    classes: highlighted ? 'highlighted-edge' : undefined,
+  }
+}
+
+function safeParseObs(raw) {
+  if (!raw) return null
+  if (typeof raw === 'object') return raw
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+// Extract Cytoscape elements from a single tool step
+function elementsFromStep(step) {
+  const els = []
+  const obs = safeParseObs(step.observation)
+  if (!obs) return els
+
+  // Normalise tool name — strip _tool suffix added by MCP server naming
+  const tool = (step.tool || '').replace(/_tool$/, '')
+
+  if (tool === 'get_entity_profile') {
+    // obs = {node: {id, name, risk_score, ...}, neighbors: [{rel, label, id, rel_props}]}
+    const nodeProps = obs.node || {}
+    const entityId = nodeProps.id || step.tool_input?.entity_id
+    if (entityId) {
+      const n = makeNode(entityId, _labelFromId(entityId), nodeProps, true)
+      if (n) els.push(n)
+      ;(obs.neighbors || []).forEach(nb => {
+        if (!nb.id) return
+        const nbNode = makeNode(nb.id, nb.label || _labelFromId(nb.id), {})
+        if (nbNode) els.push(nbNode)
+        const e = makeEdge(entityId, nb.id, nb.rel)
+        if (e) els.push(e)
+      })
     }
   }
+
+  if (tool === 'expand_neighborhood') {
+    // obs = {nodes: [{data:{id,label,properties}}], edges: [{data:{source,target,type}}]}
+    const nodes = obs.nodes || []
+    const edges = obs.edges || []
+    nodes.forEach(n => {
+      const nd = n.data || n
+      const nodeLabel = nd.label || nd.nodeLabel || _labelFromId(nd.id)
+      const props = nd.properties || {}
+      const node = makeNode(nd.id, nodeLabel, { risk_score: props.risk_score, status: props.status })
+      if (node) els.push(node)
+    })
+    edges.forEach(e => {
+      const ed = e.data || e
+      const edge = makeEdge(ed.source, ed.target, ed.type || ed.label)
+      if (edge) els.push(edge)
+    })
+  }
+
+  if (tool === 'find_paths') {
+    // obs = [{ids:[...], rels:[...], hops:N}]
+    const pathList = Array.isArray(obs) ? obs : (obs.paths || [])
+    const firstPath = pathList[0]
+    if (firstPath?.ids) {
+      const ids = firstPath.ids
+      const rels = firstPath.rels || []
+      ids.forEach(id => {
+        const n = makeNode(id, _labelFromId(id), {}, true)
+        if (n) els.push(n)
+      })
+      for (let i = 0; i < ids.length - 1; i++) {
+        const e = makeEdge(ids[i], ids[i + 1], rels[i], true)
+        if (e) els.push(e)
+      }
+    }
+  }
+
+  if (tool === 'shared_attributes') {
+    // obs = [{bridge_id, bridge_labels, bridge_name, bridge_risk}]
+    const bridges = Array.isArray(obs) ? obs : []
+    const seedA = step.tool_input?.a
+    const seedB = step.tool_input?.b
+    if (seedA) { const n = makeNode(seedA, _labelFromId(seedA), {}, true); if (n) els.push(n) }
+    if (seedB) { const n = makeNode(seedB, _labelFromId(seedB), {}, true); if (n) els.push(n) }
+    bridges.forEach(b => {
+      const bid = b.bridge_id
+      const blabels = b.bridge_labels || []
+      const blabel = blabels[0] || _labelFromId(bid)
+      const bn = makeNode(bid, blabel, { risk_score: b.bridge_risk }, true)
+      if (bn) els.push(bn)
+      if (seedA) { const e = makeEdge(seedA, bid, 'SHARED'); if (e) els.push(e) }
+      if (seedB) { const e = makeEdge(seedB, bid, 'SHARED'); if (e) els.push(e) }
+    })
+  }
+
+  if (tool === 'detect_communities') {
+    // obs = {community_id, members:[{id, labels:[...], risk_score}], size}
+    const members = obs.members || []
+    members.forEach(m => {
+      const mlabels = m.labels || []
+      const mlabel = mlabels[0] || _labelFromId(m.id)
+      const n = makeNode(m.id, mlabel, { risk_score: m.risk_score }, true)
+      if (n) els.push(n)
+    })
+  }
+
+  if (tool === 'rank_central_nodes') {
+    // obs = [{id, label, degree, risk_score}]
+    const rankList = Array.isArray(obs) ? obs : []
+    rankList.forEach(n => {
+      const node = makeNode(n.id, n.label || _labelFromId(n.id), { risk_score: n.risk_score }, (n.degree || 0) > 3)
+      if (node) els.push(node)
+    })
+  }
+
+  if (tool === 'trace_money_flow') {
+    // obs = {account_id, inbound:[{txn_id,amount,ts,src}], outbound:[{txn_id,amount,ts,dest}]}
+    const srcId = obs.account_id || step.tool_input?.account_id
+    if (srcId) { const n = makeNode(srcId, 'Account', {}, true); if (n) els.push(n) }
+    ;(obs.outbound || []).forEach(txn => {
+      if (txn.txn_id) {
+        const tn = makeNode(txn.txn_id, 'Transaction', { risk_score: txn.risk_score })
+        if (tn) els.push(tn)
+        if (srcId) { const e = makeEdge(srcId, txn.txn_id, 'SENT'); if (e) els.push(e) }
+      }
+      if (txn.dest) {
+        const dn = makeNode(txn.dest, 'Account', {})
+        if (dn) els.push(dn)
+        if (txn.txn_id) { const e = makeEdge(txn.txn_id, txn.dest, 'TO'); if (e) els.push(e) }
+      }
+    })
+    ;(obs.inbound || []).forEach(txn => {
+      if (txn.src) {
+        const sn = makeNode(txn.src, 'Account', {})
+        if (sn) els.push(sn)
+        if (txn.txn_id) { const e = makeEdge(txn.src, txn.txn_id, 'SENT'); if (e) els.push(e) }
+        if (srcId && txn.txn_id) { const e = makeEdge(txn.txn_id, srcId, 'TO'); if (e) els.push(e) }
+      }
+    })
+  }
+
+  return els.filter(Boolean)
 }
 
 export default function App() {
   const [status, setStatus] = useState('checking')
   const [prefilledQuery, setPrefilledQuery] = useState('')
   const { sendQuery, messages, isLoading } = useAgent()
-  const { elements, addNodes, addPath, addSubgraph, clearGraph } = useGraph()
+  const { elements, addNodes, clearGraph } = useGraph()
 
   useEffect(() => {
     fetch('http://localhost:8000/health')
@@ -70,127 +208,31 @@ export default function App() {
       .catch(() => setStatus('error'))
   }, [])
 
-  const handleNodeInvestigate = (id) => {
-    setPrefilledQuery(`Investigate ${id}`)
-  }
+  const handleNodeInvestigate = (id) => setPrefilledQuery(`Investigate ${id}`)
 
   const handleSend = (query) => {
     setPrefilledQuery('')
-    sendQuery(query, (result) => {
-      if (result?.steps) {
-        const allEls = []
-        result.steps.forEach(step => {
-          try {
-            const obs = typeof step.observation === 'string'
-              ? JSON.parse(step.observation)
-              : step.observation
+    clearGraph()   // clear old graph when starting a new investigation
 
-            // Normalize tool name: strip trailing _tool suffix so comparisons work
-            // regardless of whether the MCP server appends it.
-            const toolName = (step.tool || '').replace(/_tool$/, '')
-
-            if (toolName === 'get_entity_profile' && obs?.node) {
-              const n = obs.node
-              const nodeLabel = n.label || _labelFromId(n.id) || 'Node'
-              allEls.push(makeNode(n.id, nodeLabel, { risk_score: n.risk_score, status: n.status }))
-              // Also render neighbours as nodes
-              ;(obs.neighbors || []).forEach(nb => {
-                if (nb.id) {
-                  const nbLabel = nb.label || _labelFromId(nb.id) || 'Node'
-                  allEls.push(makeNode(nb.id, nbLabel, {}))
-                  allEls.push(makeEdge(n.id, nb.id, nb.rel || 'REL'))
-                }
-              })
-            }
-
-            if (toolName === 'expand_neighborhood') {
-              // Each item is {data: {id, label, properties}} / {data: {source, target, type}}
-              const nodes = obs?.nodes || []
-              const edges = obs?.edges || []
-              nodes.forEach(n => {
-                const nd = n.data || n
-                const nodeLabel = nd.label || _labelFromId(nd.id) || 'Node'
-                const props = nd.properties || {}
-                allEls.push(makeNode(nd.id, nodeLabel, { risk_score: props.risk_score, status: props.status }))
-              })
-              edges.forEach(e => {
-                const ed = e.data || e
-                allEls.push(makeEdge(ed.source, ed.target, ed.type || ed.label || 'REL'))
-              })
-            }
-
-            if (toolName === 'find_paths') {
-              // find_paths returns [{ids, rels, hops}]
-              const pathList = Array.isArray(obs) ? obs : obs?.paths || []
-              const firstPath = pathList[0]
-              if (firstPath?.ids) {
-                const ids = firstPath.ids
-                const rels = firstPath.rels || []
-                ids.forEach(id => {
-                  const nodeLabel = _labelFromId(id) || 'Node'
-                  allEls.push({ ...makeNode(id, nodeLabel, {}), classes: 'highlighted' })
-                })
-                for (let i = 0; i < ids.length - 1; i++) {
-                  allEls.push({ ...makeEdge(ids[i], ids[i + 1], rels[i] || 'REL'), classes: 'highlighted-edge' })
-                }
-              } else if (obs?.path_nodes) {
-                addPath(obs)
-              }
-            }
-
-            if (toolName === 'detect_communities' && obs?.members) {
-              obs.members.forEach(n => {
-                const nodeLabel = (n.labels && n.labels[0]) || n.label || _labelFromId(n.id) || 'Node'
-                allEls.push({ ...makeNode(n.id, nodeLabel, { risk_score: n.risk_score }), classes: 'highlighted' })
-              })
-            }
-
-            if (toolName === 'rank_central_nodes') {
-              // rank_central_nodes returns a list directly
-              const rankList = Array.isArray(obs) ? obs : obs?.nodes || []
-              rankList.forEach(n => {
-                const nodeLabel = n.label || _labelFromId(n.id) || 'Node'
-                const el = makeNode(n.id, nodeLabel, { risk_score: n.risk_score, degree: n.degree })
-                if ((n.degree || 0) > 3) el.classes = 'highlighted'
-                allEls.push(el)
-              })
-            }
-
-            if (toolName === 'trace_money_flow' && obs) {
-              const accts = [...(obs.inbound || []), ...(obs.outbound || [])]
-              accts.forEach(n => allEls.push(makeNode(n.id || n.account_id, 'Account', { status: n.status })))
-            }
-
-            if (toolName === 'score_cluster' && obs?.members) {
-              obs.members.forEach(n => allEls.push(makeNode(n.id, n.label || 'Node', { risk_score: n.risk_score })))
-            }
-
-            if (obs?.subgraph) {
-              addSubgraph(obs.subgraph)
-            }
-          } catch (e) {
-            // JSON parse might fail for non-JSON observations
-          }
-        })
-
-        if (result?.subgraph) {
-          addSubgraph(result.subgraph)
-        } else if (allEls.length > 0) {
-          addNodes(allEls)
-        }
-      }
+    sendQuery(query, (update) => {
+      if (!update?.steps) return
+      const newEls = []
+      update.steps.forEach(step => {
+        elementsFromStep(step).forEach(el => newEls.push(el))
+      })
+      if (newEls.length > 0) addNodes(newEls)
     })
   }
 
   return (
-    <div id="app" style={{display: 'flex', flexDirection: 'column', height: '100vh'}}>
+    <div id="app" style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <header className="header">
         <div
           className={`status-dot ${status === 'connected' ? 'connected' : ''}`}
           title={`FalkorDB: ${status}`}
         />
         <h1>🔍 Fraud Investigation Agent</h1>
-        <span style={{marginLeft: 'auto', color: '#64748b', fontSize: '0.8rem'}}>
+        <span style={{ marginLeft: 'auto', color: '#64748b', fontSize: '0.8rem' }}>
           FalkorDB · Groq · LangChain
         </span>
       </header>

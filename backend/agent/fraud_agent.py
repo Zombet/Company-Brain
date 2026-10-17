@@ -14,78 +14,95 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
 
 from langchain_groq import ChatGroq
-from langchain.agents.factory import create_agent
 from langchain.mcp import MCPAdapter
+from langchain.agents.factory import create_agent
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from agent.memory import persist_session
 
-SYSTEM_PROMPT = """You are a Fraud Investigation Agent with full access to a FalkorDB graph database \
-containing customers, accounts, transactions, devices, IP addresses, addresses, phones, merchants, \
-alerts, cases, evidence, decisions, and actions.
+# ---------------------------------------------------------------------------
+# System prompt — concise version to reduce LLM latency
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """You are a Fraud Investigation Agent with access to a FalkorDB graph database.
+Always cite the specific graph data returned by each tool. Be concise.
 
-Every answer MUST cite the specific graph data you retrieved. Never speculate without graph evidence.
+STRICT RULES:
+- Use AT MOST 4 tool calls per investigation. Choose wisely.
+- Never call the same tool twice with the same arguments.
+- After 4 tool calls, write your final answer immediately.
 
-Investigation workflow (10 steps):
-1. Start with get_entity_profile_tool to understand the seed entity and its immediate connections.
-2. Use expand_neighborhood_tool (depth=2) to map the wider community around the entity.
-3. Call trace_money_flow_tool on any Account to detect mule chains, rapid pass-through, or structuring.
-4. Use shared_attributes_tool to explain WHY two entities appear linked (shared device, IP, address).
-5. Call find_paths_tool between suspicious entities to prove specific connections and hop distances.
-6. Run detect_communities_tool on the most connected entity to enumerate the full fraud ring.
-7. Use rank_central_nodes_tool on community members to identify the kingpin (highest-degree node).
-8. Call score_cluster_tool to get a quantitative risk score for the whole ring.
-9. For confirmed fraud: call freeze_account_tool (dry_run=True first), open_case_tool, flag_cluster_tool.
-   For ambiguous findings: call escalate_to_human_tool with a clear reason.
-10. Summarize: name every entity examined, every relationship type traversed, confidence level,
-    and a narrative explaining how the ring is connected (e.g., "Alice and Bob share no direct link
-    but both used Device D_dev1 within 2 days, which also connects to Account A_kunal_main that
-    received funds from 4 flagged accounts").
+Quick decision guide (pick the minimum tools needed):
+- "Who is X / what is X linked to?" → get_entity_profile_tool only (1 tool)
+- "Find ring / community" → detect_communities_tool → score_cluster_tool (2 tools)
+- "How are X and Y connected?" → find_paths_tool (1 tool)
+- "Full investigation" → get_entity_profile_tool → detect_communities_tool → score_cluster_tool → open_case_tool (4 tools max)
+- "Is X suspicious?" → get_entity_profile_tool → score_cluster_tool (2 tools)
 
-Graduated response tiers:
-- Low confidence  (<0.4 cluster_score): monitor only, no action.
-- Medium confidence (0.4–0.7): step-up verification — open a case, request KYC refresh.
-- High confidence  (>0.7): freeze hub account, flag cluster, escalate to human.
+Graduated response (based on cluster_score or risk_score):
+- < 0.4 → monitor only
+- 0.4–0.7 → open_case_tool
+- > 0.7 → open_case_tool + escalate_to_human_tool
 
-Explainability rules:
-- For every finding, state which tool produced it and what the key graph data was.
-- When clearing a false positive (e.g., legitimate family sharing a device), state your reasons.
-- Always link your confidence level to specific graph signals (degree, velocity_score, shared attributes).
-
-Action rules:
-- Action tools (freeze_account_tool, open_case_tool, flag_cluster_tool) require reason and evidence_ids.
-- Use dry_run=True unless the user explicitly requests a live action.
-- Every action is written back to the graph as an Action node — this gives the system memory."""
+End every response with: VERDICT: [what you found] | CONFIDENCE: [low/medium/high] | ACTION: [what to do]"""
 
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _tools_script = Path(os.path.join(_backend_dir, 'mcp_server', 'tools.py'))
 
+# ---------------------------------------------------------------------------
+# Persistent MCP adapter — reuse across investigations to avoid subprocess
+# startup overhead on every call.
+# ---------------------------------------------------------------------------
+_adapter = None
+_adapter_tools = None
+
+
+async def _get_tools():
+    """Return cached MCP tools, reconnecting if the adapter is stale."""
+    global _adapter, _adapter_tools
+    try:
+        if _adapter is not None and _adapter_tools is not None:
+            return _adapter_tools
+    except Exception:
+        pass
+
+    _adapter = MCPAdapter(_tools_script)
+    await _adapter.__aenter__()
+    _adapter_tools = await _adapter.list_tools()
+    return _adapter_tools
+
 
 async def run_investigation(query: str, session_id: str = None, stream_callback=None) -> dict:
-    """Run the fraud investigation agent on a query using LangChain + MCPAdapter."""
+    """Run the fraud investigation agent on a query."""
     session_id = session_id or str(uuid.uuid4())
     started_at = int(datetime.utcnow().timestamp())
 
     groq_api_key = os.environ.get('GROQ_API_KEY', '')
+    groq_model = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-20b')
 
-    # MCPAdapter with a Path target launches tools.py over stdio
-    async with MCPAdapter(_tools_script) as adapter:
-        tools = await adapter.list_tools()
+    # Get tools — reuses the persistent adapter if available
+    try:
+        tools = await _get_tools()
+    except Exception:
+        # Fallback: fresh adapter
+        global _adapter, _adapter_tools
+        _adapter = None
+        _adapter_tools = None
+        tools = await _get_tools()
 
-        llm = ChatGroq(
-            model="openai/gpt-oss-120b",
-            temperature=0,
-            api_key=groq_api_key,
-        )
+    llm = ChatGroq(
+        model=groq_model,
+        temperature=0,
+        api_key=groq_api_key,
+    )
 
-        agent = create_agent(
-            model=llm,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-        )
+    agent = create_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=SYSTEM_PROMPT,
+    )
 
-        result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=query)]}
-        )
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content=query)]}
+    )
 
     ended_at = int(datetime.utcnow().timestamp())
 
@@ -117,25 +134,28 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
             steps_serializable.append({
                 "tool": tool_name,
                 "tool_input": tool_input,
-                "observation": str(observation)[:2000],
+                "observation": str(observation)[:3000],
             })
-            tool_steps.append((tool_name, tool_input, str(observation)[:2000]))
+            tool_steps.append((tool_name, tool_input, str(observation)[:3000]))
 
             if stream_callback:
                 await stream_callback({
                     "tool": tool_name,
                     "tool_input": tool_input,
-                    "observation": str(observation)[:2000],
+                    "observation": str(observation)[:3000],
                 })
 
-    await persist_session(
-        session_id=session_id,
-        query=query,
-        conclusion=final_answer,
-        tool_steps=tool_steps,
-        started_at=started_at,
-        ended_at=ended_at,
-    )
+    try:
+        await persist_session(
+            session_id=session_id,
+            query=query,
+            conclusion=final_answer,
+            tool_steps=tool_steps,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+    except Exception as e:
+        print(f"[agent] persist_session warning: {e}")
 
     return {
         "session_id": session_id,
