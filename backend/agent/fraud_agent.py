@@ -22,36 +22,57 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from agent.memory import persist_session
 
 # ---------------------------------------------------------------------------
-# System prompt — concise version to reduce LLM latency
+# System prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are a Fraud Investigation Agent with access to a FalkorDB graph database.
-Always cite the specific graph data returned by each tool. Be concise.
+SYSTEM_PROMPT = """You are a Fraud Investigation Agent with access to a FalkorDB graph database containing customers, accounts, transactions, devices, IPs, addresses, phones, merchants, alerts, cases, evidence, decisions, and actions.
 
-STRICT RULES:
-- Use AT MOST 4 tool calls per investigation. Choose wisely.
-- Never call the same tool twice with the same arguments.
-- After 4 tool calls, write your final answer immediately.
+RULES:
+- Use AT MOST 4 tool calls. Never repeat the same tool with the same arguments.
+- Every claim must reference a specific tool result (IDs, scores, amounts).
+- Do not guess or speculate.
 
-Quick decision guide (pick the minimum tools needed):
-- "Who is X / what is X linked to?" → get_entity_profile_tool only (1 tool)
-- "Find ring / community" → detect_communities_tool → score_cluster_tool (2 tools)
-- "How are X and Y connected?" → find_paths_tool (1 tool)
-- "Full investigation" → get_entity_profile_tool → detect_communities_tool → score_cluster_tool → open_case_tool (4 tools max)
-- "Is X suspicious?" → get_entity_profile_tool → score_cluster_tool (2 tools)
+TOOL SELECTION:
+- Entity context: get_entity_profile_tool
+- Ring/community: detect_communities_tool then score_cluster_tool
+- Money trail: trace_money_flow_tool
+- Connection proof: find_paths_tool
+- Shared bridge nodes: shared_attributes_tool
+- Kingpin ranking: rank_central_nodes_tool
 
-Graduated response (based on cluster_score or risk_score):
-- < 0.4 → monitor only
-- 0.4–0.7 → open_case_tool
-- > 0.7 → open_case_tool + escalate_to_human_tool
+REQUIRED RESPONSE FORMAT - always include all 5 sections:
 
-End every response with: VERDICT: [what you found] | CONFIDENCE: [low/medium/high] | ACTION: [what to do]"""
+## Investigation Summary
+One paragraph: what was investigated, what the graph reveals overall.
+
+## Graph Evidence
+| Step | Tool | Key Findings |
+|------|------|-------------|
+(one row per tool call, quote specific IDs/scores/amounts from results)
+
+## Fraud Indicators
+Bullet list of every signal found:
+- Shared device: [device ID] used by [customer IDs]
+- Shared address: [address ID] linked to [customer IDs]
+- Transfer chain: [account A] -> [account B] -> [account C] ([amounts])
+- Flagged transactions: [IDs] with risk scores [values]
+- High risk scores: [entity IDs] with scores [values]
+- Community size: [N] members in [community ID]
+- Cycle detected: money returned to origin via [path]
+
+## Confidence Assessment
+cluster_score: [value] | avg_risk: [value] | Confidence: [low/medium/high]
+Two sentences explaining what graph signals drive this confidence.
+
+## Recommended Action
+- cluster_score < 0.4: Monitor [specific entities]
+- cluster_score 0.4-0.7: Open case linking alerts [IDs]
+- cluster_score > 0.7: Freeze account [specific account ID], escalate case [ID]"""
 
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _tools_script = Path(os.path.join(_backend_dir, 'mcp_server', 'tools.py'))
 
 # ---------------------------------------------------------------------------
-# Persistent MCP adapter — reuse across investigations to avoid subprocess
-# startup overhead on every call.
+# Persistent MCP adapter - reuse across calls to avoid subprocess startup
 # ---------------------------------------------------------------------------
 _adapter = None
 _adapter_tools = None
@@ -65,7 +86,6 @@ async def _get_tools():
             return _adapter_tools
     except Exception:
         pass
-
     _adapter = MCPAdapter(_tools_script)
     await _adapter.__aenter__()
     _adapter_tools = await _adapter.list_tools()
@@ -84,11 +104,10 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
     openrouter_model = os.environ.get('OPENROUTER_MODEL', 'meta-llama/llama-3.3-70b-instruct')
     llm_provider = os.environ.get('LLM_PROVIDER', 'groq')
 
-    # Get tools — reuses the persistent adapter if available
+    # Get tools - reuse persistent adapter
     try:
         tools = await _get_tools()
     except Exception:
-        # Fallback: fresh adapter
         global _adapter, _adapter_tools
         _adapter = None
         _adapter_tools = None
@@ -129,7 +148,6 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
     )
 
     ended_at = int(datetime.utcnow().timestamp())
-
     messages = result.get("messages", [])
 
     # Final answer: last AIMessage without tool calls
@@ -141,33 +159,36 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
 
     steps_serializable = []
     tool_steps = []
-
     tool_results = {msg.tool_call_id: msg for msg in messages if isinstance(msg, ToolMessage)}
 
     for ai_msg in messages:
         if not isinstance(ai_msg, AIMessage):
             continue
-        tool_calls = getattr(ai_msg, "tool_calls", None) or []
-        for tc in tool_calls:
+        for tc in (getattr(ai_msg, "tool_calls", None) or []):
             tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
             tool_input = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
             tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
             obs_msg = tool_results.get(tc_id)
-            observation = obs_msg.content if obs_msg else ""
+            raw_obs = obs_msg.content if obs_msg else ""
 
-            steps_serializable.append({
+            # Unwrap OpenRouter content-block format: [{"type":"text","text":"..."}]
+            # so the frontend receives a plain JSON string, not a list of blocks
+            if isinstance(raw_obs, list):
+                text_blocks = [b.get("text", "") for b in raw_obs if isinstance(b, dict) and b.get("type") == "text"]
+                observation = text_blocks[0] if text_blocks else json.dumps(raw_obs)
+            else:
+                observation = str(raw_obs) if raw_obs else ""
+
+            step = {
                 "tool": tool_name,
                 "tool_input": tool_input,
-                "observation": str(observation)[:3000],
-            })
-            tool_steps.append((tool_name, tool_input, str(observation)[:3000]))
+                "observation": str(observation)[:4000],
+            }
+            steps_serializable.append(step)
+            tool_steps.append((tool_name, tool_input, str(observation)[:4000]))
 
             if stream_callback:
-                await stream_callback({
-                    "tool": tool_name,
-                    "tool_input": tool_input,
-                    "observation": str(observation)[:3000],
-                })
+                await stream_callback(step)
 
     try:
         await persist_session(

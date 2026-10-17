@@ -62,15 +62,38 @@ function makeEdge(source, target, type, highlighted = false) {
 
 function safeParseObs(raw) {
   if (!raw) return null
-  if (typeof raw === 'object') return raw
-  try { return JSON.parse(raw) } catch { return null }
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw
+
+  // Handle OpenRouter content-block format: '[{"type":"text","text":"{...}"}]'
+  // or plain JSON string
+  let str = raw
+  if (Array.isArray(raw)) {
+    // Already parsed array of content blocks
+    const textBlock = raw.find(b => b.type === 'text')
+    str = textBlock ? textBlock.text : null
+  } else if (typeof raw === 'string') {
+    // Try to detect content-block wrapper
+    const trimmed = raw.trim()
+    if (trimmed.startsWith('[{') && trimmed.includes('"type"') && trimmed.includes('"text"')) {
+      try {
+        const blocks = JSON.parse(trimmed)
+        const textBlock = Array.isArray(blocks) && blocks.find(b => b.type === 'text')
+        str = textBlock ? textBlock.text : trimmed
+      } catch { str = trimmed }
+    }
+  }
+  if (!str) return null
+  try { return JSON.parse(str) } catch { return null }
 }
 
 // Extract Cytoscape elements from a single tool step
 function elementsFromStep(step) {
   const els = []
   const obs = safeParseObs(step.observation)
-  if (!obs) return els
+  if (!obs) {
+    console.log('[graph] no obs for tool:', step.tool, 'raw:', typeof step.observation, String(step.observation).substring(0, 100))
+    return els
+  }
 
   // Normalise tool name — strip _tool suffix added by MCP server naming
   const tool = (step.tool || '').replace(/_tool$/, '')
@@ -212,15 +235,25 @@ export default function App() {
 
   const handleSend = (query) => {
     setPrefilledQuery('')
-    clearGraph()   // clear old graph when starting a new investigation
+    clearGraph()
 
     sendQuery(query, (update) => {
       if (!update?.steps) return
       const newEls = []
       update.steps.forEach(step => {
-        elementsFromStep(step).forEach(el => newEls.push(el))
+        try {
+          const els = elementsFromStep(step)
+          els.forEach(el => newEls.push(el))
+        } catch (e) {
+          console.warn('elementsFromStep error:', e, step)
+        }
       })
-      if (newEls.length > 0) addNodes(newEls)
+      if (newEls.length > 0) {
+        console.log('[graph] adding', newEls.length, 'elements from', update.steps.map(s => s.tool))
+        addNodes(newEls)
+      } else {
+        console.log('[graph] no elements from steps:', update.steps.map(s => s.tool))
+      }
     })
   }
 
