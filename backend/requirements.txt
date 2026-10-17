@@ -3,6 +3,8 @@ fastapi==0.138.0
 uvicorn[standard]==0.49.0
 langchain==1.4.6
 langchain-groq==1.1.3
+langchain-google-genai==2.1.4
+langchain-openai==1.7.2
 langchain-core==1.6.11
 # langchain-mcp-adapters is replaced by langchain[mcp] in LangChain 1.x
 # MCP support is built into langchain.mcp (requires mcp>=2.0)

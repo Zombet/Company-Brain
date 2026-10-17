@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
 
 from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain.mcp import MCPAdapter
 from langchain.agents.factory import create_agent
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -76,7 +78,11 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
     started_at = int(datetime.utcnow().timestamp())
 
     groq_api_key = os.environ.get('GROQ_API_KEY', '')
-    groq_model = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-20b')
+    groq_model = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
+    gemini_api_key = os.environ.get('GEMINI_API_KEY', '')
+    openrouter_api_key = os.environ.get('OPENROUTER_API_KEY', '')
+    openrouter_model = os.environ.get('OPENROUTER_MODEL', 'meta-llama/llama-3.3-70b-instruct')
+    llm_provider = os.environ.get('LLM_PROVIDER', 'groq')
 
     # Get tools — reuses the persistent adapter if available
     try:
@@ -88,11 +94,29 @@ async def run_investigation(query: str, session_id: str = None, stream_callback=
         _adapter_tools = None
         tools = await _get_tools()
 
-    llm = ChatGroq(
-        model=groq_model,
-        temperature=0,
-        api_key=groq_api_key,
-    )
+    if llm_provider == 'openrouter' and openrouter_api_key:
+        llm = ChatOpenAI(
+            model=openrouter_model,
+            temperature=0,
+            api_key=openrouter_api_key,
+            base_url='https://openrouter.ai/api/v1',
+            default_headers={
+                'HTTP-Referer': 'http://localhost:5173',
+                'X-Title': 'Fraud Investigation Agent',
+            },
+        )
+    elif llm_provider == 'gemini' and gemini_api_key:
+        llm = ChatGoogleGenerativeAI(
+            model='gemini-2.0-flash',
+            temperature=0,
+            google_api_key=gemini_api_key,
+        )
+    else:
+        llm = ChatGroq(
+            model=groq_model,
+            temperature=0,
+            api_key=groq_api_key,
+        )
 
     agent = create_agent(
         model=llm,
