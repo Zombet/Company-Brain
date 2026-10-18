@@ -604,11 +604,18 @@ def detect_circular_flow(graph, account_id: str) -> dict:
     Use this when investigating circular flow or money laundering cycles.
     Looks for 3-hop cycles: A -> B -> C -> A.
     """
+    def _safe_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
     cypher = """
 MATCH (a:Account {id: $id})-[:SENT]->(t1:Transaction)-[:TO]->(b:Account)
 MATCH (b)-[:SENT]->(t2:Transaction)-[:TO]->(c:Account)
 MATCH (c)-[:SENT]->(t3:Transaction)-[:TO]->(a)
 WHERE b <> a AND c <> b AND c <> a
+  AND t1 <> t2 AND t2 <> t3 AND t1 <> t3
 RETURN a.id AS start, t1.amount AS amt1, t1.ts AS ts1,
        b.id AS mid1, t2.amount AS amt2, t2.ts AS ts2,
        c.id AS mid2, t3.amount AS amt3, t3.ts AS ts3
@@ -619,15 +626,14 @@ LIMIT 5
         rows = _rows_to_dicts(result)
         if rows:
             r = rows[0]
-            # Guard: if any intermediate node is None, the cycle is degenerate
             if not (r.get("start") and r.get("mid1") and r.get("mid2")):
                 return {"cycle_found": False}
             return {
                 "cycle_found": True,
                 "path": [r["start"], r["mid1"], r["mid2"], r["start"]],
-                "amounts": [r["amt1"], r["amt2"], r["amt3"]],
+                "amounts": [_safe_float(r["amt1"]), _safe_float(r["amt2"]), _safe_float(r["amt3"])],
                 "timestamps": [r["ts1"], r["ts2"], r["ts3"]],
-                "extracted": min(float(r["amt1"] or 0), float(r["amt2"] or 0), float(r["amt3"] or 0))
+                "extracted": _safe_float(r["amt1"]) - _safe_float(r["amt3"]),
             }
         return {"cycle_found": False}
     except Exception as e:

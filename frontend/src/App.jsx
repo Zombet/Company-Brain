@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+﻿import React, { useState, useEffect } from 'react'
 import ChatPanel from './components/ChatPanel'
 import GraphPanel from './components/GraphPanel'
 import { useAgent } from './hooks/useAgent'
@@ -191,17 +191,46 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'detect_communities') {
-    // obs = {community_id, members:[{id, labels:[...], risk_score}], size}
-    // Only show meaningful node types — skip IP, Phone (too noisy)
+    // obs = {community_id, members:[{id, labels:[...], risk_score, name}], size}
+    // Only show Customer, Device, Address — skip IP, Phone (too noisy)
     const SHOW_LABELS = ['Customer', 'Device', 'Address']
     const members = obs.members || []
+    const seedId = step.tool_input?.seed_id
+
+    // Add seed node explicitly (BFS excludes it from members)
+    if (seedId) {
+      const seedLabel = _labelFromId(seedId)
+      if (SHOW_LABELS.includes(seedLabel)) {
+        const sn = makeNode(seedId, seedLabel, {}, true)
+        if (sn) els.push(sn)
+      }
+    }
+
+    // Add members
+    const addedIds = new Set(seedId ? [String(seedId)] : [])
     members.forEach(m => {
       const mlabels = m.labels || []
       const mlabel = mlabels[0] || _labelFromId(m.id)
-      if (!SHOW_LABELS.includes(mlabel)) return  // skip IP, Phone etc
+      if (!SHOW_LABELS.includes(mlabel)) return
       const n = makeNode(m.id, mlabel, { risk_score: m.risk_score, name: m.name }, true)
-      if (n) els.push(n)
+      if (n) { els.push(n); addedIds.add(String(m.id)) }
     })
+
+    // Add edges between Customers and their Device/Address bridge nodes
+    // We know the relationships from the schema:
+    // Customer -[:USED_DEVICE]-> Device, Customer -[:LIVES_AT]-> Address
+    // For any Device or Address node found, emit edges to/from Customer nodes
+    const customerIds = [...addedIds].filter(id => id.startsWith('C_'))
+    const bridgeIds = [...addedIds].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
+    // We can't know exact edges from the obs alone, so emit edges from seed to bridges
+    // and let the neighborhood fetch fill in the rest
+    if (seedId && seedId.startsWith('C_')) {
+      bridgeIds.forEach(bid => {
+        const relType = bid.startsWith('D_') ? 'USED_DEVICE' : 'LIVES_AT'
+        const e = makeEdge(seedId, bid, relType, true)
+        if (e) els.push(e)
+      })
+    }
   }
 
   if (tool === 'rank_central_nodes') {
@@ -305,7 +334,10 @@ export default function App() {
                        firstStep?.tool_input?.account_id ||
                        firstStep?.tool_input?.a
         if (seedId) {
-          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=1`)
+          // Use depth=2 for community investigations so ring members connect through shared bridges
+          const isCommunity = update.steps.some(s => (s.tool || '').includes('detect_communities'))
+          const depth = isCommunity ? 2 : 1
+          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=${depth}`)
             .then(r => r.json())
             .then(data => {
               const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
@@ -366,3 +398,37 @@ export default function App() {
     </div>
   )
 }
+        // Helper: fetch a node's neighborhood and add filtered results to graph
+        const fetchNbr = (id, depth) => {
+          const SHOW = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
+          return fetch(`http://localhost:8000/api/entity/${id}/neighborhood?depth=${depth}`)
+            .then(r => r.json()).then(data => {
+              const els2 = []; const seen = new Set()
+              ;(data.nodes || []).forEach(n => {
+                const nd = n.data || n; const lbl = nd.label || nd.nodeLabel || ''
+                if (!SHOW.includes(lbl)) return
+                const p = nd.properties || {}
+                const node = makeNode(nd.id, lbl, { risk_score: p.risk_score, status: p.status, name: p.name || null })
+                if (node) { els2.push(node); seen.add(String(nd.id)) }
+              })
+              ;(data.edges || []).forEach(e => {
+                const ed = e.data || e; const s = String(ed.source||''); const t = String(ed.target||'')
+                if (!s||!t||!seen.has(s)||!seen.has(t)) return
+                const edge = makeEdge(s, t, ed.type||ed.label); if (edge) els2.push(edge)
+              })
+              if (els2.length > 0) addNodes(els2)
+              return seen
+            }).catch(() => new Set())
+        }
+        if (seedId) {
+          const isCommunity = update.steps.some(s => (s.tool || '').includes('detect_communities'))
+          if (isCommunity) {
+            fetchNbr(seedId, 2).then(seen => {
+              const bridges = [...seen].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
+              bridges.forEach(bid => fetchNbr(bid, 1))
+            })
+          } else {
+            fetchNbr(seedId, 1)
+          }
+        }
+
