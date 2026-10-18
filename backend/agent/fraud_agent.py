@@ -35,9 +35,9 @@ TOOL SELECTION:
 - Entity context: get_entity_profile_tool
 - Ring/community: detect_communities_tool then score_cluster_tool
 - Money trail: trace_money_flow_tool
-- Connection proof: find_paths_tool
-- Shared bridge nodes: shared_attributes_tool
-- Kingpin ranking: rank_central_nodes_tool
+- Connection proof / bridge node / path between two entities: find_paths_tool
+- Why two specific entities share a common attribute (same device/address): shared_attributes_tool
+- Kingpin ranking within a community: rank_central_nodes_tool
 
 REQUIRED RESPONSE FORMAT - always include all 5 sections:
 
