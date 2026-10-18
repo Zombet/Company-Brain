@@ -365,29 +365,38 @@ def rank_central_nodes(graph, node_ids: list) -> list:
 # 7. Trace money flow
 # ---------------------------------------------------------------------------
 
-def trace_money_flow(graph, account_id: str, window_seconds: int = 86400) -> dict:
+def trace_money_flow(graph, account_id: str, window_seconds: int = 0) -> dict:
     """Trace inbound and outbound transactions within a time window.
 
     Use this tool to detect mule chains, rapid pass-through, or structuring patterns.
-    window_seconds defaults to 86400 (24 hours).
+    window_seconds=0 means no time filter (show all transactions).
     """
-    start_ts = int(time.time()) - int(window_seconds)
     try:
+        if window_seconds > 0:
+            start_ts = int(time.time()) - int(window_seconds)
+            ts_filter = "WHERE t.ts >= $start_ts"
+            params_out = {"id": account_id, "start_ts": start_ts}
+            params_in = {"id": account_id, "start_ts": start_ts}
+        else:
+            ts_filter = ""
+            params_out = {"id": account_id, "start_ts": 0}
+            params_in = {"id": account_id, "start_ts": 0}
+
         # Outbound
         out_result = graph.query(
-            """MATCH (a:Account {id: $id})-[:SENT]->(t:Transaction)-[:TO]->(b:Account)
-WHERE t.ts >= $start_ts
-RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS dest""",
-            {"id": account_id, "start_ts": start_ts},
+            f"""MATCH (a:Account {{id: $id}})-[:SENT]->(t:Transaction)-[:TO]->(b:Account)
+{ts_filter}
+RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS dest, t.status AS status""",
+            params_out,
         )
         outbound = _rows_to_dicts(out_result)
 
         # Inbound
         in_result = graph.query(
-            """MATCH (b:Account)-[:SENT]->(t:Transaction)-[:TO]->(a:Account {id: $id})
-WHERE t.ts >= $start_ts
-RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS src""",
-            {"id": account_id, "start_ts": start_ts},
+            f"""MATCH (b:Account)-[:SENT]->(t:Transaction)-[:TO]->(a:Account {{id: $id}})
+{ts_filter}
+RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS src, t.status AS status""",
+            params_in,
         )
         inbound = _rows_to_dicts(in_result)
 
