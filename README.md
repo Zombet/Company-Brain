@@ -1,309 +1,416 @@
-# Fraud Investigation Agent — FalkorDB Hackathon Track 1
+# Fraud Investigation Agent
+### FalkorDB Hackathon — Track 1: Agents That Act on Connected Data
 
-A real-time fraud investigation agent where FalkorDB is the irreplaceable core. The agent uses LangChain + Groq (openai/gpt-oss-120b) as the reasoning engine, FastMCP as the tool layer, and every tool makes a direct Cypher query to the graph. Fraud ring detection, multi-hop account tracing, session memory, and account flagging all live in FalkorDB — removing the graph stops the product entirely.
+A real-time fraud investigation agent that uses **FalkorDB as its reasoning engine**. The agent traverses a graph of customers, accounts, transactions, devices, addresses, and IPs to detect fraud rings, mule chains, circular flows, and kingpin accounts — and explains every finding by citing the exact graph path it followed.
+
+FalkorDB is not a side store. Every tool call is a Cypher query. Remove FalkorDB and the agent answers nothing.
+
+---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          User / Browser                                │
-└───────────────────────────────┬────────────────────────────────────────┘
-                                │ HTTP / WebSocket
-                                ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│              React UI  (Vite + Cytoscape.js)  :5173                   │
-└───────────────────────────────┬───────────────────────────────────────┘
-                                │ REST + WebSocket
-                                ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                   FastAPI  (port 8000)                                │
-│                                                                       │
-│   ┌─────────────────────────────────────────────────────────────┐    │
-│   │              LangChain ReAct Agent                           │    │
-│   │                                                             │    │
-│   │  calls tools via ◄──────────────────────► Groq API          │    │
-│   │                                           openai/gpt-oss-120b  │    │
-│   └────────────────────────┬────────────────────────────────────┘    │
-└────────────────────────────┼───────────────────────────────────────── ┘
-                             │ stdio (subprocess)
-                             ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                  FastMCP Tool Server                                  │
-│   get_connected_accounts  |  trace_fraud_ring  |  flag_account       │
-│   get_transaction_path    |  get_risk_neighbors | get_investigation.. │
-└───────────────────────────────┬───────────────────────────────────────┘
-                                │ Cypher queries
-                                ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                  FalkorDB  (port 6379)                                │
-│              graph: fraud_investigation                               │
-└───────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        User / Browser                               │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ HTTP / WebSocket
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│           React 18 + Cytoscape.js  (Vite, port 5173)               │
+│  Chat panel (streaming)  │  Graph panel (nodes appear per tool)     │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ REST + WebSocket
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  FastAPI  (port 8000)                               │
+│                                                                     │
+│   LangChain ReAct Agent ──────────────────► OpenRouter LLM API     │
+│          │                                  (llama-3.3-70b)        │
+│          │ MCP stdio                                                │
+│          ▼                                                          │
+│   FastMCP Tool Server (12 tools)                                   │
+│   get_entity_profile  │  detect_communities  │  find_paths         │
+│   trace_money_flow    │  score_cluster       │  freeze_account ...  │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ Cypher queries
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              FalkorDB  (port 6379 + browser UI port 3000)          │
+│              graph: fraud_investigation                             │
+│  43 nodes · 67 relationships · 5 fraud scenarios seeded            │
+└─────────────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Graph Data Model
 
-The schema promotes shared attributes to nodes so fraud rings become traversable paths. A shared device is only discoverable as a multi-hop connection if the device is a node, not a property.
+The schema promotes shared attributes to **nodes** instead of properties. A shared device is only discoverable as a multi-hop path if the device is a node — that is what makes the connections traversable.
 
-### Node Types (13)
+### Node Labels (13)
 
 #### Data Layer
 
 | Label | ID Prefix | Key Properties |
-|---|---|---|
-| **Customer** | `C_` | `id`, `name`, `email`, `kyc_status`, `risk_score`, `community_id`, `community_computed_at` |
-| **Account** | `A_` | `id`, `account_type`, `bank_name`, `balance`, `status` (`active`\|`frozen`), `risk_score` |
-| **Transaction** | `T_` | `id`, `amount`, `currency`, `ts`, `status`, `channel`, `risk_score` |
-| **Device** | `D_` | `id`, `fingerprint`, `device_type`, `os`, `first_seen`, `last_seen` |
-| **IP** | `IP_` | `id`, `address`, `country`, `isp` |
-| **Phone** | *(none)* | `id`, `number`, `carrier` |
+|-------|-----------|----------------|
+| **Customer** | `C_` | `id`, `name`, `kyc_status`, `risk_score`, `community_id` |
+| **Account** | `A_` | `id`, `bank_name`, `balance`, `status` (`active`\|`frozen`), `risk_score` |
+| **Transaction** | `T_` | `id`, `amount`, `ts` (Unix epoch), `status`, `risk_score` |
+| **Device** | `D_` | `id`, `fingerprint`, `device_type`, `first_seen`, `last_seen` |
 | **Address** | `ADDR_` | `id`, `street`, `city`, `country` |
-| **Email** | *(none)* | `id`, `address`, `domain` |
-| **Merchant** | *(none)* | `id`, `name`, `category`, `country`, `risk_score` |
+| **IP** | `IP_` | `id`, `address`, `country` |
+| **Phone** | `PH_` | `id`, `number` |
+| **Merchant** | `M_` | `id`, `name`, `category`, `risk_score` |
 
 #### Agent / Audit Layer
 
 | Label | ID Prefix | Key Properties |
-|---|---|---|
-| **Alert** | `AL_` | `id`, `type`, `severity`, `ts` |
-| **Case** | `CASE_` | `id`, `status`, `opened_at`, `closed_at` |
-| **Decision** | `DEC_` | `id`, `verdict`, `confidence`, `rationale`, `ts` |
+|-------|-----------|----------------|
+| **Alert** | `AL_` | `id`, `type`, `severity`, `triggered_at` |
+| **Case** | `CASE_` | `id`, `status`, `opened_at`, `summary` |
 | **Evidence** | `EV_` | `id`, `kind`, `summary`, `entities`, `payload` |
+| **Decision** | `DEC_` | `id`, `verdict`, `confidence`, `rationale`, `created_at` |
 | **Action** | `ACT_` | `id`, `type`, `dry_run`, `reason`, `ts` |
 
-### Relationship Types
+### Relationship Types (15)
 
-| Type | From → To | Key Properties |
+| Relationship | From → To | Properties |
 |---|---|---|
-| **OWNS** | Customer → Account | `since` |
-| **SENT** | Account → Transaction | `ts`, `amount` |
-| **TO** | Transaction → Account | — |
-| **USED_DEVICE** | Customer → Device | `first_seen`, `last_seen` |
-| **LOGGED_IN_FROM** | Customer → IP | `ts` |
-| **HAS_PHONE** | Customer → Phone | — |
-| **LIVES_AT** | Customer → Address | — |
-| **HAS_EMAIL** | Customer → Email | — |
-| **AT** | Transaction → Merchant | `processed_at` |
-| **TRIGGERED_BY** | Alert → Transaction\|Account | — |
-| **CONTAINS** | Case → Alert | — |
-| **ABOUT** | Decision → Case | — |
-| **EVIDENCED_BY** | Decision → Evidence | — |
-| **LED_TO** | Decision → Action | — |
-| **TARGETS** | Action → Account\|Customer\|Case | — |
+| `OWNS` | Customer → Account | `since` |
+| `SENT` | Account → Transaction | `amount`, `ts` |
+| `TO` | Transaction → Account | — |
+| `USED_DEVICE` | Customer → Device | `first_seen`, `last_seen` |
+| `LOGGED_IN_FROM` | Customer → IP | `ts` |
+| `HAS_PHONE` | Customer → Phone | — |
+| `LIVES_AT` | Customer → Address | — |
+| `AT` | Transaction → Merchant | `processed_at` |
+| `TRIGGERED_BY` | Alert → Transaction | — |
+| `CONTAINS` | Case → Alert | — |
+| `HAS_EVIDENCE` | Case → Evidence | — |
+| `ABOUT` | Decision → Case | — |
+| `EVIDENCED_BY` | Decision → Evidence | — |
+| `LED_TO` | Decision → Action | — |
+| `TARGETS` | Action → Account\|Customer\|Case | — |
 
-### ID Convention
+### Why this schema detects fraud
 
-The prefix on every ID tells tools which label to query, enabling safe, label-aware lookups without ambiguity:
+Two customers sharing a device is **only a traversable path** if Device is a node:
 
 ```
-C_     Customer        A_     Account         T_     Transaction
-D_     Device          IP_    IP              ADDR_  Address
-AL_    Alert           CASE_  Case            DEC_   Decision
-EV_    Evidence        ACT_   Action
+(C_kunal)-[:USED_DEVICE]->(D_ring1)<-[:USED_DEVICE]-(C_aryan)
 ```
 
-## Setup Instructions
+As a property on Customer, this connection doesn't exist until you write a join query. As a node, the agent finds it with a single 2-hop traversal.
+
+---
+
+## Seeded Fraud Scenarios
+
+The synthetic data is crafted so each scenario rewards a specific graph query pattern.
+
+| Scenario | Entities | What the graph reveals |
+|---|---|---|
+| **Fraud Ring** | C_kunal, C_aryan, C_ifrah, C_priya, C_hassan, C_nina, C_riya, C_dev | 8 customers with no direct links, all reachable through shared devices D_ring1, D_ring2 and address ADDR_ring1 — 2-3 hops |
+| **Mule Chain** | C_john → C_sarah → C_mike → C_lisa | Decreasing amounts ($10K→$9.2K→$8.5K→$8K) over 2 hours ending at a cash-out merchant |
+| **Circular Flow** | C_omar, C_diana, C_felix | A_omar1→A_diana1→A_felix1→A_omar1: money returns to origin |
+| **Decoy (false positive)** | C_raj, C_meera, C_aditya | Legitimate family sharing a device and address — risk scores ≤0.15, all KYC verified, cleared by agent |
+| **Kingpin Bridge** | C_kingpin / A_kingpin1 | One account bridges the fraud ring and mule chain; invisible by volume, revealed by degree centrality |
+
+---
+
+## Cypher Queries the Product Depends On
+
+These are the queries executed on every investigation. The product stops working without them.
+
+### 1. Community detection — finds the full fraud ring
+
+```cypher
+MATCH (seed {id: $id})-[*1..8]-(member)
+WHERE member.id <> $id
+RETURN DISTINCT member.id AS mid, labels(member) AS mlabels, member.risk_score AS mrisk
+```
+
+Write-back (batch, not per-node to avoid engine panic):
+```cypher
+UNWIND $ids AS mid
+MATCH (m:Customer {id: mid})
+SET m.community_id = $cid, m.community_computed_at = timestamp()
+```
+
+### 2. Shortest path — proves connection between two entities
+
+FalkorDB requires `shortestPath` in a `WITH` clause, not `MATCH`:
+
+```cypher
+MATCH (x {id: $a}), (y {id: $b})
+WITH shortestPath((x)-[*1..6]-(y)) AS p
+RETURN [n IN nodes(p) | n.id]        AS ids,
+       [r IN relationships(p) | type(r)] AS rels,
+       length(p) AS hops
+```
+
+### 3. Shared attributes — finds bridge nodes connecting two entities
+
+```cypher
+MATCH (x {id: $a})-[*1..2]-(bridge)-[*1..2]-(y {id: $b})
+WHERE bridge.id <> $a AND bridge.id <> $b
+RETURN DISTINCT bridge.id AS bridge_id, labels(bridge) AS bridge_labels,
+       bridge.risk_score AS bridge_risk
+```
+
+### 4. Money flow tracing — detects mule chains and structuring
+
+```cypher
+MATCH (a:Account {id: $id})-[:SENT]->(t:Transaction)-[:TO]->(b:Account)
+WHERE t.ts >= $start_ts
+RETURN t.id AS txn_id, t.amount AS amount, t.ts AS ts, b.id AS dest
+```
+
+### 5. Degree centrality — identifies the kingpin
+
+```cypher
+UNWIND $ids AS nid
+MATCH (n {id: nid})-[r]-()
+RETURN n.id AS nid, labels(n) AS nlabels, count(r) AS degree, n.risk_score AS risk_score
+```
+
+### 6. Cluster risk scoring — quantifies ring danger
+
+```cypher
+MATCH (n {community_id: $cid})
+RETURN count(n) AS member_count, avg(n.risk_score) AS avg_risk, max(n.risk_score) AS max_risk
+```
+
+```cypher
+MATCH (c:Customer {community_id: $cid})-[:USED_DEVICE]->(d:Device)
+RETURN count(DISTINCT d) AS shared_devs
+```
+
+### 7. Account freeze write-back — agent action persisted to graph
+
+```cypher
+MATCH (a:Account {id: $account_id})
+SET a.status = 'frozen'
+
+CREATE (act:Action {
+  id: $action_id, type: 'freeze_account',
+  dry_run: $dry_run, reason: $reason, ts: timestamp()
+})
+MATCH (act:Action {id: $action_id}), (a:Account {id: $account_id})
+CREATE (act)-[:TARGETS]->(a)
+```
+
+### 8. Entity profile — 1-hop context for any node
+
+```cypher
+MATCH (n:Customer {id: $id})-[r]-(nb)
+RETURN type(r) AS rel, labels(nb) AS nb_labels, nb.id AS nb_id,
+       nb.name AS nb_name, properties(r) AS rel_props
+```
+
+---
+
+## Agent Tools (12)
+
+The LangChain agent selects from these tools via MCP (stdio transport). Each tool is a Cypher query — no tool works without FalkorDB.
+
+| Tool | Type | Purpose |
+|------|------|---------|
+| `get_entity_profile` | Read | 1-hop context for any entity |
+| `expand_neighborhood` | Read | Variable-depth traversal (2-6 hops) |
+| `find_paths` | Read | Shortest path between two entities |
+| `shared_attributes` | Read | Bridge nodes connecting two entities |
+| `detect_communities` | Read + Write | Full ring detection with write-back |
+| `rank_central_nodes` | Read | Degree centrality — find the kingpin |
+| `trace_money_flow` | Read | Inbound/outbound flow with velocity score |
+| `score_cluster` | Read | Aggregate risk score for a community |
+| `freeze_account` | **Write** | Sets account.status=frozen, creates Action node |
+| `open_case` | **Write** | Creates Case linked to Alerts |
+| `flag_cluster` | **Write** | Raises risk scores for ring members |
+| `escalate_to_human` | **Write** | Creates escalation Action node |
+
+---
+
+## Local Setup Instructions
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+
-- FalkorDB running on `localhost:6379`
-  ```bash
-  docker run -p 6379:6379 falkordb/falkordb
-  ```
-- Groq API key
+| Requirement | Version | Install |
+|---|---|---|
+| Python | 3.11+ | python.org |
+| Node.js | 18+ | nodejs.org |
+| Docker | any | docker.com |
+| Git | any | git-scm.com |
 
-### Environment
+### Step 1 — Clone and configure
+
+```bash
+git clone <your-repo-url>
+cd Company-Brain
+```
 
 Create a `.env` file in the project root:
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
+# LLM — OpenRouter (free tier, no card required)
+# Sign up at openrouter.ai, get key starting with sk-or-v1-...
+OPENROUTER_API_KEY=your_openrouter_key_here
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct
+LLM_PROVIDER=openrouter
+
+# FalkorDB
 FALKORDB_HOST=localhost
 FALKORDB_PORT=6379
 GRAPH_NAME=fraud_investigation
+
+# Fallback LLM options (set LLM_PROVIDER=groq or LLM_PROVIDER=gemini)
+GROQ_API_KEY=your_groq_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+GEMINI_API_KEY=your_gemini_key_here
 ```
 
-### Backend
+### Step 2 — Start FalkorDB
 
 ```bash
-cd Company-Brain
+docker run -d \
+  -p 6379:6379 \
+  -p 3000:3000 \
+  --restart unless-stopped \
+  --name falkordb \
+  falkordb/falkordb
+```
+
+- Database: `localhost:6379`
+- Browser UI: `http://localhost:3000`
+
+### Step 3 — Install Python dependencies
+
+```bash
 pip install -r backend/requirements.txt
-python data/seed_graph.py
-cd backend
-uvicorn main:app --reload
 ```
 
-The API will be available at http://localhost:8000.  
-Health check: http://localhost:8000/health
-
-### Frontend
+### Step 4 — Seed the graph
 
 ```bash
-cd Company-Brain/frontend
+python data/seed_graph.py
+```
+
+Expected output:
+```
+Seed complete — node counts by label:
+  Customer    19    Account      20    Transaction  21
+  Device       3    Address       2    IP           19
+  Phone       19    Merchant      2    Alert         3
+  Case         2    Evidence      2    Decision      2    Action  2
+```
+
+### Step 5 — Start the backend
+
+```bash
+cd backend
+uvicorn main:app --port 8000
+```
+
+Verify: `http://localhost:8000/health` → `{"status": "ok", "falkordb": "connected"}`
+
+### Step 6 — Start the frontend
+
+```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173
+Open `http://localhost:5173`
 
-## Cypher Queries
+---
 
-The six Cypher queries the product depends on, as executed by the MCP tool server.
+## Free Cloud Deployment
 
-### 1. `get_connected_accounts` — Multi-hop account discovery
+The project can be fully deployed for free using these services:
 
-Follows `USED → Device ← USED`, `TRANSFERRED_TO`, and `OWNS → Customer ← OWNS` paths from the transaction's source account.
+| Component | Service | Free tier |
+|---|---|---|
+| FalkorDB | [FalkorDB Cloud](https://app.falkordb.cloud) | Free instance |
+| Backend | [Render.com](https://render.com) | Free web service |
+| Frontend | [Vercel](https://vercel.com) | Free static hosting |
+| LLM | [OpenRouter](https://openrouter.ai) | Free models (llama-3.3-70b) |
 
-```cypher
-MATCH (t:Transaction {id: $transaction_id})<-[:MADE]-(a:Account)
-OPTIONAL MATCH (a)-[:USED]->(d:Device)<-[:USED]-(a2:Account)
-  WHERE a2.id <> a.id
-OPTIONAL MATCH (a)-[:TRANSFERRED_TO*1..2]-(a3:Account)
-  WHERE a3.id <> a.id
-OPTIONAL MATCH (a)<-[:OWNS]-(c:Customer)-[:OWNS]->(a4:Account)
-  WHERE a4.id <> a.id
-WITH a, collect(DISTINCT a2) + collect(DISTINCT a3) + collect(DISTINCT a4) AS connected
-UNWIND connected AS conn
-RETURN DISTINCT
-  conn.id          AS account_id,
-  conn.status      AS status,
-  conn.risk_score  AS risk_score,
-  conn.bank_name   AS bank_name
-ORDER BY conn.risk_score DESC
+### Deploy FalkorDB Cloud
+
+1. Sign up at [app.falkordb.cloud](https://app.falkordb.cloud)
+2. Create a free instance
+3. Copy the connection string: `redis://:<password>@<host>:<port>`
+4. Update `.env`:
+   ```env
+   FALKORDB_HOST=your-cloud-host
+   FALKORDB_PORT=your-cloud-port
+   FALKORDB_PASSWORD=your-cloud-password
+   ```
+5. Run `python data/seed_graph.py` to seed the cloud instance
+
+### Deploy Backend on Render
+
+1. Push code to GitHub
+2. Sign up at [render.com](https://render.com)
+3. New → Web Service → connect your repo
+4. Settings:
+   - **Root Directory**: `backend`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+5. Add all `.env` variables under Environment
+6. Deploy
+
+### Deploy Frontend on Vercel
+
+1. Sign up at [vercel.com](https://vercel.com)
+2. Import your GitHub repo
+3. Settings:
+   - **Root Directory**: `frontend`
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+4. Add environment variable:
+   - `VITE_API_URL` = your Render backend URL
+5. Update `frontend/vite.config.js` proxy to point to the Render URL for production
+
+---
+
+## Example Queries to Try
+
+```
+Investigate the fraud ring starting from C_kunal
+Trace the mule chain starting from A_john1
+Find path between C_kunal and C_kingpin
+Is the family of C_raj suspicious? They share a device and address
+Investigate circular money flow involving C_omar
+Who is the kingpin connecting the ring and mule chain?
+Find fraud ring from AL_ring_alert
 ```
 
-### 2. `trace_fraud_ring` — Variable-length path to flagged neighbors
-
-Walks up to 3 hops from the target account and returns any neighbor whose status is `flagged` or `confirmed_fraud`.
-
-```cypher
-MATCH path = (start:Account {id: $account_id})-[*1..3]-(neighbor:Account)
-WHERE neighbor.status IN ['flagged', 'confirmed_fraud']
-  AND neighbor.id <> $account_id
-WITH neighbor,
-     length(path)          AS hops,
-     [r IN relationships(path) | type(r)] AS rel_types,
-     [n IN nodes(path) | n.id]            AS path_ids
-RETURN DISTINCT
-  neighbor.id         AS account_id,
-  neighbor.status     AS status,
-  neighbor.risk_score AS risk_score,
-  hops,
-  rel_types,
-  path_ids
-ORDER BY neighbor.risk_score DESC, hops ASC
-LIMIT 50
-```
-
-### 3. `get_transaction_path` — Shortest path between two accounts
-
-Uses `shortestPath()` to prove a direct connection and returns every node and relationship along the route. FalkorDB requires `shortestPath` in a `WITH`/`RETURN` clause (not a `MATCH` clause).
-
-```cypher
-MATCH (a1:Account {id: $from_account_id}),
-      (a2:Account {id: $to_account_id})
-WITH shortestPath((a1)-[*1..10]-(a2)) AS path
-RETURN
-  [n IN nodes(path) | {id: n.id, labels: labels(n), risk_score: n.risk_score}] AS path_nodes,
-  [r IN relationships(path) | {type: type(r), properties: properties(r)}]      AS path_rels,
-  length(path) AS hop_count
-```
-
-### 4. `get_investigation_history` — Session memory from the graph
-
-Fetches the 20 most-recent `AgentSession` nodes linked to this account via `INVESTIGATED` edges, giving the agent cross-session memory.
-
-```cypher
-MATCH (s:AgentSession)-[:INVESTIGATED]->(a:Account {id: $account_id})
-RETURN
-  s.session_id  AS session_id,
-  s.started_at  AS started_at,
-  s.query       AS query,
-  s.conclusion  AS conclusion,
-  s.tools_used  AS tools_used
-ORDER BY s.started_at DESC
-LIMIT 20
-```
-
-### 5. `flag_account` — Write flagging status back to the graph
-
-Marks an account as flagged, records the reason, and ensures the risk score reaches at least 0.8.
-
-```cypher
-MATCH (a:Account {id: $account_id})
-SET
-  a.status      = 'flagged',
-  a.flag_reason = $reason,
-  a.flagged_at  = timestamp(),
-  a.flagged_by  = 'agent',
-  a.risk_score  = CASE WHEN a.risk_score < 0.8 THEN 0.8 ELSE a.risk_score END
-RETURN
-  a.id          AS account_id,
-  a.status      AS new_status,
-  a.flag_reason AS reason,
-  a.flagged_at  AS flagged_at
-```
-
-### 6. `get_risk_neighbors` — Single-hop neighborhood scan
-
-Returns every node directly connected to an account along with relationship type and risk metadata.
-
-```cypher
-MATCH (a:Account {id: $account_id})-[r]-(neighbor)
-RETURN
-  neighbor.id         AS neighbor_id,
-  labels(neighbor)    AS neighbor_labels,
-  type(r)             AS relationship_type,
-  neighbor.risk_score AS risk_score,
-  neighbor.status     AS status,
-  properties(r)       AS rel_properties
-ORDER BY neighbor.risk_score DESC
-```
-
-## Example Investigation Questions
-
-- `"Investigate C_kunal — are they part of a fraud ring?"`
-- `"Trace money flow from A_john1 over the last 7 days"`
-- `"Why was alert AL_ring_alert triggered?"`
-- `"Find path between A_kunal1 and A_lisa1"`
-- `"What accounts are linked to T_mule1?"`
-- `"Flag A_kingpin1 for suspicious activity"`
-- `"Which customers share Device D_shared1?"`
-- `"Detect communities starting from C_aryan"`
-
-## Seeded Fraud Scenarios
-
-The synthetic seed data is not random — each scenario is crafted to reward smart graph queries and test the agent's discernment.
-
-| Scenario | Description |
-|---|---|
-| **Fraud Ring** | 6–8 customers (including `C_kunal`, `C_aryan`, `C_ifrah`) with no direct links but all reachable through 2 shared devices (`D_ring1`, `D_ring2`) and 1 shared address (`ADDR_ring1`) — 3 hops apart. |
-| **Mule Chain** | Money passes through a chain `C_john → C_sarah → C_mike → C_lisa` (accounts `A_john1 → A_sarah1 → A_mike1 → A_lisa1`) with decreasing amounts over short intervals ending at a cash-out. |
-| **Circular Flow** | Funds cycle back to their origin: `A_circ1 → A_circ2 → A_circ3 → A_circ1`, making the money appear to move without leaving the ring. |
-| **Decoy (False Positive)** | Legitimate family members `C_raj`, `C_meera`, and `C_aditya` share a device and address — they look suspicious on naive queries but should be cleared by the agent. |
-| **Bridge / Kingpin** | `C_kingpin` controls a high-centrality account (`A_kingpin1`) that bridges two otherwise-unconnected clusters; not obvious by transaction volume alone, revealed by betweenness centrality. |
+---
 
 ## Tech Stack
 
-| Component | Technology |
-|---|---|
-| Graph database | FalkorDB |
-| Backend language | Python 3.11 |
-| API server | FastAPI (REST + WebSocket) |
-| Agent framework | LangChain |
-| LLM | Groq / openai/gpt-oss-120b |
-| Tool server | FastMCP (stdio transport) |
-| Frontend | React 18 |
-| Graph visualization | Cytoscape.js |
-| Frontend build | Vite |
+| Component | Technology | Version |
+|---|---|---|
+| Graph database | FalkorDB | latest |
+| Backend | Python + FastAPI | 3.11 / 0.138 |
+| Agent framework | LangChain | 1.4.6 |
+| LLM | OpenRouter / llama-3.3-70b-instruct | — |
+| MCP tool server | FastMCP | 4.1.0 |
+| Frontend | React + Vite | 18 / 5.4 |
+| Graph visualization | Cytoscape.js | 3.30 |
 
-## Hackathon Track
+---
 
-**Track 1: Agents That Act on Connected Data**
+## Hackathon Submission
 
-The graph is not a side store — it is the reasoning substrate. Every agent decision follows edges. Every session is written back as nodes. Take FalkorDB out and the product does not run.
+**Track**: Track 1 — Agents That Act on Connected Data
+
+**Why FalkorDB is load-bearing**: Every one of the 12 agent tools executes a Cypher query. The fraud ring is only discoverable because Device and Address are nodes — shared attributes become traversable paths. The agent's memory (past investigations, decisions, actions) lives in the graph as `AgentSession`, `Decision`, `Evidence`, and `Action` nodes. Remove FalkorDB and the product stops entirely — there is no fallback store.
+
+---
 
 ## Disclosure
 
-Built with AI coding assistance (Kiro).
+Built with AI coding assistance (Kiro). All code understood and explainable by the submitter.
