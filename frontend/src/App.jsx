@@ -73,16 +73,11 @@ function makeEdge(source, target, type, highlighted = false) {
 function safeParseObs(raw) {
   if (!raw) return null
   if (typeof raw === 'object' && !Array.isArray(raw)) return raw
-
-  // Handle OpenRouter content-block format: '[{"type":"text","text":"{...}"}]'
-  // or plain JSON string
   let str = raw
   if (Array.isArray(raw)) {
-    // Already parsed array of content blocks
     const textBlock = raw.find(b => b.type === 'text')
     str = textBlock ? textBlock.text : null
   } else if (typeof raw === 'string') {
-    // Try to detect content-block wrapper
     const trimmed = raw.trim()
     if (trimmed.startsWith('[{') && trimmed.includes('"type"') && trimmed.includes('"text"')) {
       try {
@@ -96,21 +91,14 @@ function safeParseObs(raw) {
   try { return JSON.parse(str) } catch { return null }
 }
 
-// Extract Cytoscape elements from a single tool step
 function elementsFromStep(step) {
   const els = []
   const obs = safeParseObs(step.observation)
-  if (!obs) {
-    console.log('[graph] no obs for tool:', step.tool, 'raw:', typeof step.observation, String(step.observation).substring(0, 100))
-    return els
-  }
+  if (!obs) return els
 
-  // Normalise tool name — strip _tool suffix added by MCP server naming
   const tool = (step.tool || '').replace(/_tool$/, '')
 
   if (tool === 'get_entity_profile') {
-    // obs = {node: {id, name, risk_score, ...}, neighbors: [{rel, label, id, rel_props}]}
-    // Only show meaningful node types — skip IP, Phone (too noisy)
     const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant', 'Evidence', 'Decision']
     const nodeProps = obs.node || {}
     const entityId = nodeProps.id || step.tool_input?.entity_id
@@ -120,19 +108,16 @@ function elementsFromStep(step) {
       ;(obs.neighbors || []).forEach(nb => {
         if (!nb.id) return
         const nbLabel = nb.label || _labelFromId(nb.id)
-        if (!SHOW_LABELS.includes(nbLabel)) return  // skip IP, Phone
+        if (!SHOW_LABELS.includes(nbLabel)) return
         const nbNode = makeNode(nb.id, nbLabel, { name: nb.name })
         if (nbNode) els.push(nbNode)
-        // Edge — both nodes now exist so it's safe
-        const rel = nb.rel || 'REL'
-        const e = makeEdge(entityId, nb.id, rel)
+        const e = makeEdge(entityId, nb.id, nb.rel || 'REL')
         if (e) els.push(e)
       })
     }
   }
 
   if (tool === 'expand_neighborhood') {
-    // obs = {nodes: [{data:{id,label,properties}}], edges: [{data:{source,target,type}}]}
     const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant']
     const nodes = obs.nodes || []
     const edges = obs.edges || []
@@ -146,7 +131,6 @@ function elementsFromStep(step) {
     })
     edges.forEach(e => {
       const ed = e.data || e
-      // Only add edges where both nodes were added (i.e. not filtered out)
       const addedIds = new Set(els.map(x => x.data?.id))
       if (!addedIds.has(String(ed.source)) || !addedIds.has(String(ed.target))) return
       const edge = makeEdge(ed.source, ed.target, ed.type || ed.label)
@@ -155,7 +139,6 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'find_paths') {
-    // obs = [{ids:[...], rels:[...], hops:N}]
     const pathList = Array.isArray(obs) ? obs : (obs.paths || [])
     const firstPath = pathList[0]
     if (firstPath?.ids) {
@@ -173,7 +156,6 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'shared_attributes') {
-    // obs = [{bridge_id, bridge_labels, bridge_name, bridge_risk}]
     const bridges = Array.isArray(obs) ? obs : []
     const seedA = step.tool_input?.a
     const seedB = step.tool_input?.b
@@ -191,13 +173,10 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'detect_communities') {
-    // obs = {community_id, members:[{id, labels:[...], risk_score, name}], size}
-    // Only show Customer, Device, Address — skip IP, Phone (too noisy)
     const SHOW_LABELS = ['Customer', 'Device', 'Address']
     const members = obs.members || []
     const seedId = step.tool_input?.seed_id
 
-    // Add seed node explicitly (BFS excludes it from members)
     if (seedId) {
       const seedLabel = _labelFromId(seedId)
       if (SHOW_LABELS.includes(seedLabel)) {
@@ -206,7 +185,6 @@ function elementsFromStep(step) {
       }
     }
 
-    // Add members
     const addedIds = new Set(seedId ? [String(seedId)] : [])
     members.forEach(m => {
       const mlabels = m.labels || []
@@ -216,15 +194,8 @@ function elementsFromStep(step) {
       if (n) { els.push(n); addedIds.add(String(m.id)) }
     })
 
-    // Add edges between Customers and their Device/Address bridge nodes
-    // We know the relationships from the schema:
-    // Customer -[:USED_DEVICE]-> Device, Customer -[:LIVES_AT]-> Address
-    // For any Device or Address node found, emit edges to/from Customer nodes
-    const customerIds = [...addedIds].filter(id => id.startsWith('C_'))
-    const bridgeIds = [...addedIds].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
-    // We can't know exact edges from the obs alone, so emit edges from seed to bridges
-    // and let the neighborhood fetch fill in the rest
     if (seedId && seedId.startsWith('C_')) {
+      const bridgeIds = [...addedIds].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
       bridgeIds.forEach(bid => {
         const relType = bid.startsWith('D_') ? 'USED_DEVICE' : 'LIVES_AT'
         const e = makeEdge(seedId, bid, relType, true)
@@ -234,7 +205,6 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'rank_central_nodes') {
-    // obs = [{id, label, degree, risk_score}]
     const rankList = Array.isArray(obs) ? obs : []
     rankList.forEach(n => {
       const node = makeNode(n.id, n.label || _labelFromId(n.id), { risk_score: n.risk_score }, (n.degree || 0) > 3)
@@ -243,7 +213,6 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'trace_money_flow') {
-    // obs = {account_id, inbound:[{txn_id,amount,ts,src}], outbound:[{txn_id,amount,ts,dest}]}
     const srcId = obs.account_id || step.tool_input?.account_id
     if (srcId) { const n = makeNode(srcId, 'Account', {}, true); if (n) els.push(n) }
     ;(obs.outbound || []).forEach(txn => {
@@ -269,7 +238,6 @@ function elementsFromStep(step) {
   }
 
   if (tool === 'detect_circular_flow') {
-    // obs = {cycle_found, path:[A_omar1, A_diana1, A_felix1, A_omar1], amounts, timestamps}
     if (obs.cycle_found && obs.path) {
       const path = obs.path
       const uniqueIds = [...new Set(path)]
@@ -277,7 +245,6 @@ function elementsFromStep(step) {
         const n = makeNode(id, _labelFromId(id), {}, true)
         if (n) els.push(n)
       })
-      // Add cycle edges
       for (let i = 0; i < path.length - 1; i++) {
         const e = makeEdge(path[i], path[i + 1], 'SENT', true)
         if (e) els.push(e)
@@ -286,6 +253,38 @@ function elementsFromStep(step) {
   }
 
   return els.filter(Boolean)
+}
+
+// Helper: fetch a node's neighborhood and add filtered results to graph
+function makeFetchNbr(addNodes) {
+  const SHOW = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
+  return (id, depth) => {
+    return fetch(`http://localhost:8000/api/entity/${id}/neighborhood?depth=${depth}`)
+      .then(r => r.json())
+      .then(data => {
+        const els2 = []
+        const seen = new Set()
+        ;(data.nodes || []).forEach(n => {
+          const nd = n.data || n
+          const lbl = nd.label || nd.nodeLabel || ''
+          if (!SHOW.includes(lbl)) return
+          const p = nd.properties || {}
+          const node = makeNode(nd.id, lbl, { risk_score: p.risk_score, status: p.status, name: p.name || null })
+          if (node) { els2.push(node); seen.add(String(nd.id)) }
+        })
+        ;(data.edges || []).forEach(e => {
+          const ed = e.data || e
+          const s = String(ed.source || '')
+          const t = String(ed.target || '')
+          if (!s || !t || !seen.has(s) || !seen.has(t)) return
+          const edge = makeEdge(s, t, ed.type || ed.label)
+          if (edge) els2.push(edge)
+        })
+        if (els2.length > 0) addNodes(els2)
+        return seen
+      })
+      .catch(() => new Set())
+  }
 }
 
 export default function App() {
@@ -307,13 +306,15 @@ export default function App() {
     setPrefilledQuery('')
     clearGraph()
 
+    const fetchNbr = makeFetchNbr(addNodes)
+
     sendQuery(query, (update) => {
       if (!update?.steps) return
+
       const newEls = []
       update.steps.forEach(step => {
         try {
-          const els = elementsFromStep(step)
-          els.forEach(el => newEls.push(el))
+          elementsFromStep(step).forEach(el => newEls.push(el))
         } catch (e) {
           console.warn('elementsFromStep error:', e, step)
         }
@@ -321,49 +322,28 @@ export default function App() {
       if (newEls.length > 0) {
         console.log('[graph] adding', newEls.length, 'elements from', update.steps.map(s => s.tool))
         addNodes(newEls)
-      } else {
-        console.log('[graph] no elements from steps:', update.steps.map(s => s.tool))
       }
 
-      // After final result, fetch neighborhood for the seed entity to get edges
+      // After final result, fetch neighborhood from seed to get edges
       if (!update.partial && update.steps?.length > 0) {
-        // Find any entity ID from the first tool call
         const firstStep = update.steps[0]
         const seedId = firstStep?.tool_input?.entity_id ||
                        firstStep?.tool_input?.seed_id ||
                        firstStep?.tool_input?.account_id ||
                        firstStep?.tool_input?.a
+        const isCommunity = update.steps.some(s => (s.tool || '').includes('detect_communities'))
+
         if (seedId) {
-          // Use depth=2 for community investigations so ring members connect through shared bridges
-          const isCommunity = update.steps.some(s => (s.tool || '').includes('detect_communities'))
-          const depth = isCommunity ? 2 : 1
-          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=${depth}`)
-            .then(r => r.json())
-            .then(data => {
-              const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
-              const extraEls = []
-              const addedIds = new Set()
-              // First pass: nodes only (filtered)
-              ;(data.nodes || []).forEach(n => {
-                const nd = n.data || n
-                const lbl = nd.label || nd.nodeLabel || ''
-                if (!SHOW_LABELS.includes(lbl)) return
-                const props = nd.properties || {}
-                const node = makeNode(nd.id, lbl, { risk_score: props.risk_score, status: props.status })
-                if (node) { extraEls.push(node); addedIds.add(String(nd.id)) }
-              })
-              // Second pass: edges only if BOTH endpoints exist
-              ;(data.edges || []).forEach(e => {
-                const ed = e.data || e
-                const src = String(ed.source || '')
-                const tgt = String(ed.target || '')
-                if (!src || !tgt || !addedIds.has(src) || !addedIds.has(tgt)) return
-                const edge = makeEdge(src, tgt, ed.type || ed.label)
-                if (edge) extraEls.push(edge)
-              })
-              if (extraEls.length > 0) addNodes(extraEls)
+          if (isCommunity) {
+            // Fetch seed at depth=2, then fetch each bridge node at depth=1
+            // so all ring members connect through shared devices/addresses
+            fetchNbr(seedId, 2).then(seen => {
+              const bridges = [...seen].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
+              bridges.forEach(bid => fetchNbr(bid, 1))
             })
-            .catch(() => {})
+          } else {
+            fetchNbr(seedId, 1)
+          }
         }
       }
     })
@@ -398,37 +378,3 @@ export default function App() {
     </div>
   )
 }
-        // Helper: fetch a node's neighborhood and add filtered results to graph
-        const fetchNbr = (id, depth) => {
-          const SHOW = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
-          return fetch(`http://localhost:8000/api/entity/${id}/neighborhood?depth=${depth}`)
-            .then(r => r.json()).then(data => {
-              const els2 = []; const seen = new Set()
-              ;(data.nodes || []).forEach(n => {
-                const nd = n.data || n; const lbl = nd.label || nd.nodeLabel || ''
-                if (!SHOW.includes(lbl)) return
-                const p = nd.properties || {}
-                const node = makeNode(nd.id, lbl, { risk_score: p.risk_score, status: p.status, name: p.name || null })
-                if (node) { els2.push(node); seen.add(String(nd.id)) }
-              })
-              ;(data.edges || []).forEach(e => {
-                const ed = e.data || e; const s = String(ed.source||''); const t = String(ed.target||'')
-                if (!s||!t||!seen.has(s)||!seen.has(t)) return
-                const edge = makeEdge(s, t, ed.type||ed.label); if (edge) els2.push(edge)
-              })
-              if (els2.length > 0) addNodes(els2)
-              return seen
-            }).catch(() => new Set())
-        }
-        if (seedId) {
-          const isCommunity = update.steps.some(s => (s.tool || '').includes('detect_communities'))
-          if (isCommunity) {
-            fetchNbr(seedId, 2).then(seen => {
-              const bridges = [...seen].filter(id => id.startsWith('D_') || id.startsWith('ADDR_'))
-              bridges.forEach(bid => fetchNbr(bid, 1))
-            })
-          } else {
-            fetchNbr(seedId, 1)
-          }
-        }
-
