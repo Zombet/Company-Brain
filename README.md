@@ -325,56 +325,6 @@ Open `http://localhost:5173`
 
 ---
 
-## Free Cloud Deployment
-
-The project can be fully deployed for free using these services:
-
-| Component | Service | Free tier |
-|---|---|---|
-| FalkorDB | [FalkorDB Cloud](https://app.falkordb.cloud) | Free instance |
-| Backend | [Render.com](https://render.com) | Free web service |
-| Frontend | [Vercel](https://vercel.com) | Free static hosting |
-| LLM | [OpenRouter](https://openrouter.ai) | Free models (llama-3.3-70b) |
-
-### Deploy FalkorDB Cloud
-
-1. Sign up at [app.falkordb.cloud](https://app.falkordb.cloud)
-2. Create a free instance
-3. Copy the connection string: `redis://:<password>@<host>:<port>`
-4. Update `.env`:
-   ```env
-   FALKORDB_HOST=your-cloud-host
-   FALKORDB_PORT=your-cloud-port
-   FALKORDB_PASSWORD=your-cloud-password
-   ```
-5. Run `python data/seed_graph.py` to seed the cloud instance
-
-### Deploy Backend on Render
-
-1. Push code to GitHub
-2. Sign up at [render.com](https://render.com)
-3. New → Web Service → connect your repo
-4. Settings:
-   - **Root Directory**: `backend`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Add all `.env` variables under Environment
-6. Deploy
-
-### Deploy Frontend on Vercel
-
-1. Sign up at [vercel.com](https://vercel.com)
-2. Import your GitHub repo
-3. Settings:
-   - **Root Directory**: `frontend`
-   - **Build Command**: `npm run build`
-   - **Output Directory**: `dist`
-4. Add environment variable:
-   - `VITE_API_URL` = your Render backend URL
-5. Update `frontend/vite.config.js` proxy to point to the Render URL for production
-
----
-
 ## Example Queries to Try
 
 ```
