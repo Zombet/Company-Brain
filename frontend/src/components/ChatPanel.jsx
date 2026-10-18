@@ -18,7 +18,11 @@ const SCENARIO_CHIPS = [
 ]
 
 function renderMarkdown(text) {
+  // Guard against non-string input
   if (!text) return ''
+  if (typeof text !== 'string') {
+    try { text = JSON.stringify(text, null, 2) } catch { text = String(text) }
+  }
   const lines = text.split('\n')
   const result = []
   let i = 0
@@ -92,7 +96,13 @@ export default function ChatPanel({ messages, isLoading, onSend, history, prefil
               <div className="user-message">{msg.content}</div>
             ) : (
               <div className="agent-message">
-                <div dangerouslySetInnerHTML={{__html: renderMarkdown(msg.content)}} />
+                {(() => {
+                  try {
+                    return <div dangerouslySetInnerHTML={{__html: renderMarkdown(msg.content)}} />
+                  } catch (e) {
+                    return <div style={{color:'#ef4444'}}>Render error: {String(msg.content).slice(0,200)}</div>
+                  }
+                })()}
                 {msg.steps && msg.steps.length > 0 && (
                   <ToolCallLog steps={msg.steps} />
                 )}
