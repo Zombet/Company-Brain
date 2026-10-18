@@ -419,3 +419,32 @@ body {
   color: #94a3b8;
   font-weight: 600;
 }
+
+/* ── Graph panel improvements ── */
+.graph-panel {
+  background: #060d1a;
+}
+
+/* Make Cytoscape fill the available space properly */
+.graph-panel > div:nth-child(2) {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Node tooltip on hover — show full ID */
+.cy-node-tooltip {
+  position: absolute;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  color: #f1f5f9;
+  pointer-events: none;
+  z-index: 100;
+  white-space: nowrap;
+}
+
+/* Risk badge colors in node detail */
+.risk-bar-container { width: 100%; height: 8px; background: #1e293b; border-radius: 4px; margin: 6px 0; overflow: hidden; }
+.risk-bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }

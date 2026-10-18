@@ -31,11 +31,20 @@ function _labelFromId(id) {
 
 function makeNode(id, label, props = {}, highlighted = false) {
   if (!id) return null
+  const nodeLabel = label || _labelFromId(id)
+  // displayLabel: show the meaningful part of the ID (strip prefix)
+  // C_kunal -> kunal, A_john1 -> john1, T_ring1 -> ring1, D_ring1 -> D_ring1
+  const displayLabel = String(id)
+    .replace(/^C_/, '').replace(/^A_/, '').replace(/^T_/, '')
+    .replace(/^AL_/, '⚠ ').replace(/^CASE_/, '📁 ')
+    .replace(/^ACT_/, '⚡ ').replace(/^DEC_/, '✓ ')
+    .substring(0, 14)
   return {
     data: {
       id: String(id),
-      label: label || _labelFromId(id),
-      nodeLabel: label || _labelFromId(id),
+      label: nodeLabel,
+      nodeLabel,
+      displayLabel,
       id_short: String(id).substring(0, 12),
       risk_score: props.risk_score ?? null,
       status: props.status ?? null,
@@ -109,7 +118,9 @@ function elementsFromStep(step) {
         if (!nb.id) return
         const nbNode = makeNode(nb.id, nb.label || _labelFromId(nb.id), {})
         if (nbNode) els.push(nbNode)
-        const e = makeEdge(entityId, nb.id, nb.rel)
+        // Edge from entity to neighbor
+        const rel = nb.rel || 'REL'
+        const e = makeEdge(entityId, nb.id, rel)
         if (e) els.push(e)
       })
     }
@@ -117,17 +128,22 @@ function elementsFromStep(step) {
 
   if (tool === 'expand_neighborhood') {
     // obs = {nodes: [{data:{id,label,properties}}], edges: [{data:{source,target,type}}]}
+    const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant']
     const nodes = obs.nodes || []
     const edges = obs.edges || []
     nodes.forEach(n => {
       const nd = n.data || n
       const nodeLabel = nd.label || nd.nodeLabel || _labelFromId(nd.id)
+      if (!SHOW_LABELS.includes(nodeLabel)) return
       const props = nd.properties || {}
       const node = makeNode(nd.id, nodeLabel, { risk_score: props.risk_score, status: props.status })
       if (node) els.push(node)
     })
     edges.forEach(e => {
       const ed = e.data || e
+      // Only add edges where both nodes were added (i.e. not filtered out)
+      const addedIds = new Set(els.map(x => x.data?.id))
+      if (!addedIds.has(String(ed.source)) || !addedIds.has(String(ed.target))) return
       const edge = makeEdge(ed.source, ed.target, ed.type || ed.label)
       if (edge) els.push(edge)
     })
@@ -171,10 +187,13 @@ function elementsFromStep(step) {
 
   if (tool === 'detect_communities') {
     // obs = {community_id, members:[{id, labels:[...], risk_score}], size}
+    // Only show meaningful node types — skip IP, Phone (too noisy)
+    const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant']
     const members = obs.members || []
     members.forEach(m => {
       const mlabels = m.labels || []
       const mlabel = mlabels[0] || _labelFromId(m.id)
+      if (!SHOW_LABELS.includes(mlabel)) return  // skip IP, Phone etc
       const n = makeNode(m.id, mlabel, { risk_score: m.risk_score }, true)
       if (n) els.push(n)
     })
@@ -253,6 +272,39 @@ export default function App() {
         addNodes(newEls)
       } else {
         console.log('[graph] no elements from steps:', update.steps.map(s => s.tool))
+      }
+
+      // After final result, fetch neighborhood for the seed entity to get edges
+      if (!update.partial && update.steps?.length > 0) {
+        // Find any entity ID from the first tool call
+        const firstStep = update.steps[0]
+        const seedId = firstStep?.tool_input?.entity_id ||
+                       firstStep?.tool_input?.seed_id ||
+                       firstStep?.tool_input?.account_id ||
+                       firstStep?.tool_input?.a
+        if (seedId) {
+          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=2`)
+            .then(r => r.json())
+            .then(data => {
+              const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
+              const extraEls = []
+              ;(data.nodes || []).forEach(n => {
+                const nd = n.data || n
+                const lbl = nd.label || nd.nodeLabel || ''
+                if (!SHOW_LABELS.includes(lbl)) return
+                const props = nd.properties || {}
+                const node = makeNode(nd.id, lbl, { risk_score: props.risk_score, status: props.status })
+                if (node) extraEls.push(node)
+              })
+              ;(data.edges || []).forEach(e => {
+                const ed = e.data || e
+                const edge = makeEdge(ed.source, ed.target, ed.type || ed.label)
+                if (edge) extraEls.push(edge)
+              })
+              if (extraEls.length > 0) addNodes(extraEls)
+            })
+            .catch(() => {})
+        }
       }
     })
   }

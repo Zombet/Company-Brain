@@ -1,10 +1,20 @@
 import { useState, useCallback } from 'react'
 
 const EDGE_LABEL_MAP = {
-  SENT: 'SND', TO: '→', OWNS: 'OWN', USED_DEVICE: 'USED', LOGGED_IN_FROM: 'IP',
-  LIVES_AT: 'AT', HAS_PHONE: 'PH', HAS_EMAIL: '@', TRIGGERED_BY: 'TRIG',
-  CONTAINS: 'HAS', HAS_EVIDENCE: 'EV', ABOUT: 'RE', EVIDENCED_BY: 'EV',
-  LED_TO: '→', TARGETS: '→',
+  SENT: 'sent', TO: 'to', OWNS: 'owns', USED_DEVICE: 'device',
+  LOGGED_IN_FROM: 'IP', LIVES_AT: 'address', HAS_PHONE: 'phone',
+  AT: 'at', TRIGGERED_BY: 'alert', CONTAINS: 'has',
+  HAS_EVIDENCE: 'ev', ABOUT: 'about', EVIDENCED_BY: 'ev',
+  LED_TO: 'led to', TARGETS: 'targets', SHARED: 'shared',
+}
+
+function makeDisplayLabel(id) {
+  if (!id) return ''
+  return String(id)
+    .replace(/^C_/, '').replace(/^A_/, '').replace(/^T_/, '')
+    .replace(/^AL_/, '⚠ ').replace(/^CASE_/, '📁 ')
+    .replace(/^ACT_/, '⚡ ').replace(/^DEC_/, '✓ ')
+    .substring(0, 14)
 }
 
 export function useGraph() {
@@ -13,32 +23,33 @@ export function useGraph() {
   const addNodes = useCallback((nodes) => {
     setElements(prev => {
       const existingIds = new Set(prev.map(e => e.data?.id))
-      const newEls = nodes
-        .filter(n => !existingIds.has(n.data?.id))
-        .map(n => {
-          const id = n.data?.id
-          return {
-            data: {
-              ...n.data,
-              id_short: id ? String(id).substring(0, 12) : id,
-              nodeLabel: n.data?.nodeLabel || n.data?.type || n.data?.label,
-              shortLabel: n.data?.label ? (EDGE_LABEL_MAP[n.data.label] || n.data.label) : n.data?.label,
-            },
-            classes: n.classes || undefined,
-          }
+      const newEls = []
+      nodes.forEach(n => {
+        const id = n.data?.id
+        if (!id || existingIds.has(id)) return
+        existingIds.add(id)
+        newEls.push({
+          data: {
+            ...n.data,
+            displayLabel: n.data?.displayLabel || makeDisplayLabel(id),
+            nodeLabel: n.data?.nodeLabel || n.data?.label || n.data?.type || '',
+            shortLabel: n.data?.label ? (EDGE_LABEL_MAP[n.data.label] || n.data.label) : '',
+          },
+          classes: n.classes || undefined,
         })
-      return [...prev, ...newEls]
+      })
+      return newEls.length > 0 ? [...prev, ...newEls] : prev
     })
   }, [])
 
   const addPath = useCallback((pathData) => {
-    if (!pathData || !pathData.path_nodes) return
+    if (!pathData?.path_nodes) return
     const newNodes = pathData.path_nodes.map(n => ({
       data: {
         id: n.id,
-        label: n.id,
+        label: (n.labels && n.labels[0]) || 'Node',
         nodeLabel: (n.labels && n.labels[0]) || 'Node',
-        id_short: String(n.id).substring(0, 12),
+        displayLabel: makeDisplayLabel(n.id),
         risk_score: n.risk_score,
       },
       classes: 'highlighted'
@@ -51,8 +62,7 @@ export function useGraph() {
       newEdges.push({
         data: {
           id: `path-${src}-${tgt}`,
-          source: src,
-          target: tgt,
+          source: src, target: tgt,
           label: relType,
           shortLabel: EDGE_LABEL_MAP[relType] || relType,
         },
@@ -63,7 +73,10 @@ export function useGraph() {
       const existingIds = new Set(prev.map(e => e.data?.id))
       const combined = [...prev]
       ;[...newNodes, ...newEdges].forEach(el => {
-        if (!existingIds.has(el.data.id)) combined.push(el)
+        if (!existingIds.has(el.data.id)) {
+          existingIds.add(el.data.id)
+          combined.push(el)
+        }
       })
       return combined
     })
@@ -77,35 +90,32 @@ export function useGraph() {
       const newEls = []
       nodes.forEach(n => {
         const id = n.id
-        if (!existingIds.has(id)) {
-          newEls.push({
-            data: {
-              id,
-              label: n.label || id,
-              nodeLabel: n.label || 'Node',
-              id_short: String(id).substring(0, 12),
-              ...(n.properties || {}),
-            },
-            classes: 'highlighted'
-          })
-        }
+        if (!id || existingIds.has(id)) return
+        existingIds.add(id)
+        newEls.push({
+          data: {
+            id, label: n.label || id,
+            nodeLabel: n.label || 'Node',
+            displayLabel: makeDisplayLabel(id),
+            ...(n.properties || {}),
+          },
+          classes: 'highlighted'
+        })
       })
       edges.forEach(e => {
         const edgeId = `${e.source}-${e.target}-${e.type}`
-        if (!existingIds.has(edgeId)) {
-          newEls.push({
-            data: {
-              id: edgeId,
-              source: e.source,
-              target: e.target,
-              label: e.type,
-              shortLabel: EDGE_LABEL_MAP[e.type] || e.type,
-            },
-            classes: 'highlighted-edge'
-          })
-        }
+        if (existingIds.has(edgeId)) return
+        existingIds.add(edgeId)
+        newEls.push({
+          data: {
+            id: edgeId, source: e.source, target: e.target,
+            label: e.type,
+            shortLabel: EDGE_LABEL_MAP[e.type] || e.type,
+          },
+          classes: 'highlighted-edge'
+        })
       })
-      return [...prev, ...newEls]
+      return newEls.length > 0 ? [...prev, ...newEls] : prev
     })
   }, [])
 
