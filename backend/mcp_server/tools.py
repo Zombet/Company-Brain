@@ -20,6 +20,7 @@ from graph.queries import (
     open_case,
     flag_cluster,
     escalate_to_human,
+    detect_circular_flow,
 )
 
 mcp = FastMCP("fraud-investigation")
@@ -123,6 +124,16 @@ def trace_money_flow_tool(account_id: str, window_seconds: int = 86400) -> str:
     """
     graph = get_graph()
     return _str(trace_money_flow(graph, account_id, window_seconds))
+
+
+@mcp.tool()
+def detect_circular_flow_tool(account_id: str) -> str:
+    """Detect circular money flows (cycles) where money returns to its origin account.
+    Use this tool when investigating circular flow or money laundering cycles.
+    account_id must be an Account ID (A_ prefix), e.g. A_omar1.
+    """
+    graph = get_graph()
+    return _str(detect_circular_flow(graph, account_id))
 
 
 @mcp.tool()

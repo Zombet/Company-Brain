@@ -594,6 +594,41 @@ def json_safe_list(lst):
 
 
 # ---------------------------------------------------------------------------
+# 14. Detect circular money flow
+# ---------------------------------------------------------------------------
+
+def detect_circular_flow(graph, account_id: str) -> dict:
+    """Detect circular money flows (cycles) starting from an account.
+
+    Use this when investigating circular flow or money laundering cycles.
+    Looks for 3-hop cycles: A -> B -> C -> A.
+    """
+    cypher = """
+MATCH (a:Account {id: $id})-[:SENT]->(t1:Transaction)-[:TO]->(b:Account)
+MATCH (b)-[:SENT]->(t2:Transaction)-[:TO]->(c:Account)
+MATCH (c)-[:SENT]->(t3:Transaction)-[:TO]->(a)
+RETURN a.id AS start, t1.amount AS amt1, t1.ts AS ts1,
+       b.id AS mid1, t2.amount AS amt2, t2.ts AS ts2,
+       c.id AS mid2, t3.amount AS amt3, t3.ts AS ts3
+LIMIT 5
+"""
+    try:
+        result = graph.query(cypher, {"id": account_id})
+        rows = _rows_to_dicts(result)
+        if rows:
+            r = rows[0]
+            return {
+                "cycle_found": True,
+                "path": [r["start"], r["mid1"], r["mid2"], r["start"]],
+                "amounts": [r["amt1"], r["amt2"], r["amt3"]],
+                "timestamps": [r["ts1"], r["ts2"], r["ts3"]],
+                "extracted": float(r["amt1"] or 0) - float(r["amt3"] or 0)
+            }
+        return {"cycle_found": False}
+    except Exception as e:
+        print(f"[queries] detect_circular_flow warning: {e}")
+        return {"cycle_found": False}
+# ---------------------------------------------------------------------------
 # 11. Flag a cluster
 # ---------------------------------------------------------------------------
 

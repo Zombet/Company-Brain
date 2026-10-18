@@ -32,6 +32,15 @@ RULES:
 - Do not guess or speculate.
 
 TOOL SELECTION:
+IMPORTANT - ID FORMAT: All tool calls require IDs in the format C_name (Customer), A_name (Account), T_name (Transaction).
+When the user says "kunal", use "C_kunal". When they say "aryan", use "C_aryan". When they say "kingpin", use "C_kingpin".
+When they say "john", use "C_john". When they say "omar", use "C_omar".
+Common mappings: kunal->C_kunal, aryan->C_aryan, ifrah->C_ifrah, priya->C_priya, hassan->C_hassan, nina->C_nina,
+john->C_john, sarah->C_sarah, mike->C_mike, lisa->C_lisa, omar->C_omar, diana->C_diana, felix->C_felix,
+raj->C_raj, meera->C_meera, aditya->C_aditya, kingpin->C_kingpin, victor->C_kingpin.
+For accounts: john1->A_john1, kunal1->A_kunal1, kingpin1->A_kingpin1.
+If unsure of the exact ID, use get_entity_profile_tool with your best guess of the C_ or A_ prefixed ID.
+- Circular flow / money cycle detection: detect_circular_flow_tool (use Account ID A_omar1)
 - Entity context: get_entity_profile_tool
 - Ring/community: detect_communities_tool then score_cluster_tool
 - Money trail: trace_money_flow_tool

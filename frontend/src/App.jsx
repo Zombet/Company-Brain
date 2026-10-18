@@ -32,22 +32,23 @@ function _labelFromId(id) {
 function makeNode(id, label, props = {}, highlighted = false) {
   if (!id) return null
   const nodeLabel = label || _labelFromId(id)
-  // displayLabel: show the meaningful part of the ID (strip prefix)
-  // C_kunal -> kunal, A_john1 -> john1, T_ring1 -> ring1, D_ring1 -> D_ring1
-  const displayLabel = String(id)
-    .replace(/^C_/, '').replace(/^A_/, '').replace(/^T_/, '')
-    .replace(/^AL_/, '⚠ ').replace(/^CASE_/, '📁 ')
-    .replace(/^ACT_/, '⚡ ').replace(/^DEC_/, '✓ ')
-    .substring(0, 14)
+  let displayLabel
+  if (props.name) {
+    displayLabel = props.name.split(' ')[0]
+  } else {
+    displayLabel = String(id)
+      .replace(/^C_/, '').replace(/^A_/, '').replace(/^T_/, '')
+      .replace(/^AL_/, '\u26a0 ').replace(/^CASE_/, '\ud83d\udcc1 ')
+      .replace(/^ACT_/, '\u26a1 ').replace(/^DEC_/, '\u2713 ')
+      .substring(0, 12)
+  }
   return {
     data: {
-      id: String(id),
-      label: nodeLabel,
-      nodeLabel,
-      displayLabel,
+      id: String(id), label: nodeLabel, nodeLabel, displayLabel,
       id_short: String(id).substring(0, 12),
       risk_score: props.risk_score ?? null,
       status: props.status ?? null,
+      name: props.name || null,
       ...props,
     },
     classes: highlighted ? 'highlighted' : undefined,
@@ -114,13 +115,13 @@ function elementsFromStep(step) {
     const nodeProps = obs.node || {}
     const entityId = nodeProps.id || step.tool_input?.entity_id
     if (entityId) {
-      const n = makeNode(entityId, _labelFromId(entityId), nodeProps, true)
+      const n = makeNode(entityId, _labelFromId(entityId), { ...nodeProps, name: nodeProps.name }, true)
       if (n) els.push(n)
       ;(obs.neighbors || []).forEach(nb => {
         if (!nb.id) return
         const nbLabel = nb.label || _labelFromId(nb.id)
         if (!SHOW_LABELS.includes(nbLabel)) return  // skip IP, Phone
-        const nbNode = makeNode(nb.id, nbLabel, {})
+        const nbNode = makeNode(nb.id, nbLabel, { name: nb.name })
         if (nbNode) els.push(nbNode)
         // Edge — both nodes now exist so it's safe
         const rel = nb.rel || 'REL'
@@ -192,13 +193,13 @@ function elementsFromStep(step) {
   if (tool === 'detect_communities') {
     // obs = {community_id, members:[{id, labels:[...], risk_score}], size}
     // Only show meaningful node types — skip IP, Phone (too noisy)
-    const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant']
+    const SHOW_LABELS = ['Customer', 'Device', 'Address']
     const members = obs.members || []
     members.forEach(m => {
       const mlabels = m.labels || []
       const mlabel = mlabels[0] || _labelFromId(m.id)
       if (!SHOW_LABELS.includes(mlabel)) return  // skip IP, Phone etc
-      const n = makeNode(m.id, mlabel, { risk_score: m.risk_score }, true)
+      const n = makeNode(m.id, mlabel, { risk_score: m.risk_score, name: m.name }, true)
       if (n) els.push(n)
     })
   }
@@ -236,6 +237,23 @@ function elementsFromStep(step) {
         if (srcId && txn.txn_id) { const e = makeEdge(txn.txn_id, srcId, 'TO'); if (e) els.push(e) }
       }
     })
+  }
+
+  if (tool === 'detect_circular_flow') {
+    // obs = {cycle_found, path:[A_omar1, A_diana1, A_felix1, A_omar1], amounts, timestamps}
+    if (obs.cycle_found && obs.path) {
+      const path = obs.path
+      const uniqueIds = [...new Set(path)]
+      uniqueIds.forEach(id => {
+        const n = makeNode(id, _labelFromId(id), {}, true)
+        if (n) els.push(n)
+      })
+      // Add cycle edges
+      for (let i = 0; i < path.length - 1; i++) {
+        const e = makeEdge(path[i], path[i + 1], 'SENT', true)
+        if (e) els.push(e)
+      }
+    }
   }
 
   return els.filter(Boolean)
@@ -287,7 +305,7 @@ export default function App() {
                        firstStep?.tool_input?.account_id ||
                        firstStep?.tool_input?.a
         if (seedId) {
-          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=2`)
+          fetch(`http://localhost:8000/api/entity/${seedId}/neighborhood?depth=1`)
             .then(r => r.json())
             .then(data => {
               const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']

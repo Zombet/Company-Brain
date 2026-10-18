@@ -81,6 +81,30 @@ async def health_check():
 
 
 # ---------------------------------------------------------------------------
+# Name-to-ID resolution
+# ---------------------------------------------------------------------------
+
+@app.get("/api/resolve/{name}")
+async def resolve_entity(name: str):
+    """Resolve a human name or partial ID to a full entity ID."""
+    graph = get_graph()
+    # Try direct ID match first (with common prefixes)
+    for prefix in ['C_', 'A_', 'T_', 'AL_', 'CASE_', 'D_', 'ADDR_']:
+        candidate = prefix + name
+        r = graph.query("MATCH (n {id: $id}) RETURN n.id, labels(n)", {"id": candidate})
+        if r.result_set:
+            return {"id": r.result_set[0][0], "label": r.result_set[0][1][0] if r.result_set[0][1] else None}
+    # Try name match (case-insensitive contains)
+    r = graph.query(
+        "MATCH (n) WHERE toLower(n.name) CONTAINS toLower($name) RETURN n.id, labels(n), n.name LIMIT 3",
+        {"name": name}
+    )
+    if r.result_set:
+        return {"id": r.result_set[0][0], "label": r.result_set[0][1][0] if r.result_set[0][1] else None, "name": r.result_set[0][2]}
+    return {"id": None, "label": None}
+
+
+# ---------------------------------------------------------------------------
 # Investigation (REST + WebSocket)
 # ---------------------------------------------------------------------------
 

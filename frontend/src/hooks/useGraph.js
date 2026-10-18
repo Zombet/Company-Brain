@@ -8,12 +8,12 @@ const EDGE_LABEL_MAP = {
   LED_TO: 'led to', TARGETS: 'targets', SHARED: 'shared',
 }
 
-function makeDisplayLabel(id) {
-  if (!id) return ''
+function makeDisplayLabel(id, name) {
+  if (name) return name.split(' ')[0]
   return String(id)
     .replace(/^C_/, '').replace(/^A_/, '').replace(/^T_/, '')
-    .replace(/^AL_/, '⚠ ').replace(/^CASE_/, '📁 ')
-    .replace(/^ACT_/, '⚡ ').replace(/^DEC_/, '✓ ')
+    .replace(/^AL_/, '\u26a0 ').replace(/^CASE_/, '\ud83d\udcc1 ')
+    .replace(/^ACT_/, '\u26a1 ').replace(/^DEC_/, '\u2713 ')
     .substring(0, 14)
 }
 
@@ -34,7 +34,7 @@ export function useGraph() {
         newEls.push({
           data: {
             ...n.data,
-            displayLabel: n.data?.displayLabel || makeDisplayLabel(id),
+            displayLabel: n.data?.displayLabel || makeDisplayLabel(id, n.data?.name),
             nodeLabel: n.data?.nodeLabel || n.data?.label || n.data?.type || '',
             shortLabel: n.data?.label ? (EDGE_LABEL_MAP[n.data.label] || n.data.label) : '',
           },
@@ -71,7 +71,7 @@ export function useGraph() {
         id: n.id,
         label: (n.labels && n.labels[0]) || 'Node',
         nodeLabel: (n.labels && n.labels[0]) || 'Node',
-        displayLabel: makeDisplayLabel(n.id),
+        displayLabel: makeDisplayLabel(n.id, n.name),
         risk_score: n.risk_score,
       },
       classes: 'highlighted'
@@ -118,7 +118,7 @@ export function useGraph() {
           data: {
             id, label: n.label || id,
             nodeLabel: n.label || 'Node',
-            displayLabel: makeDisplayLabel(id),
+            displayLabel: makeDisplayLabel(id, n.name || n.properties?.name),
             ...(n.properties || {}),
           },
           classes: 'highlighted'
