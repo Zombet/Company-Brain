@@ -608,6 +608,7 @@ def detect_circular_flow(graph, account_id: str) -> dict:
 MATCH (a:Account {id: $id})-[:SENT]->(t1:Transaction)-[:TO]->(b:Account)
 MATCH (b)-[:SENT]->(t2:Transaction)-[:TO]->(c:Account)
 MATCH (c)-[:SENT]->(t3:Transaction)-[:TO]->(a)
+WHERE b <> a AND c <> b AND c <> a
 RETURN a.id AS start, t1.amount AS amt1, t1.ts AS ts1,
        b.id AS mid1, t2.amount AS amt2, t2.ts AS ts2,
        c.id AS mid2, t3.amount AS amt3, t3.ts AS ts3

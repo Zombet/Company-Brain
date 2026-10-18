@@ -12,7 +12,7 @@ const EXAMPLE_QUERIES = [
 const SCENARIO_CHIPS = [
   { name: 'Fraud Ring', query: 'Investigate the fraud ring starting from C_kunal' },
   { name: 'Mule Chain', query: 'Trace the mule chain starting from A_john1' },
-  { name: 'Circular Flow', query: 'Investigate circular money flow involving C_omar and detect any cycles using detect_circular_flow_tool' },
+  { name: 'Circular Flow', query: 'Detect circular money flow for account A_omar1 using detect_circular_flow_tool' },
   { name: 'Decoy Family', query: 'Investigate C_raj - should this family be flagged?' },
   { name: 'Kingpin', query: 'Find path between C_kunal and C_john to identify the kingpin bridge account connecting the fraud ring and mule chain' },
 ]

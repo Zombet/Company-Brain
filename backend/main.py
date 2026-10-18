@@ -24,10 +24,13 @@ from graph.queries import (
     freeze_account,
     open_case,
     escalate_to_human,
+    detect_circular_flow,
 )
 
-def _label_from_id(entity_id: str) -> str:
-    """Detect the node label from the entity ID prefix convention."""
+def _label_from_id(entity_id: str) -> str | None:
+    """Detect the node label from the entity ID prefix convention.
+    Returns None for unrecognised prefixes instead of defaulting to 'Customer'.
+    """
     prefix_map = {
         "C_": "Customer", "A_": "Account", "T_": "Transaction",
         "D_": "Device", "ADDR_": "Address", "IP_": "IP",
@@ -37,7 +40,7 @@ def _label_from_id(entity_id: str) -> str:
     for prefix, label in prefix_map.items():
         if entity_id.startswith(prefix):
             return label
-    return "Customer"
+    return None
 from agent.fraud_agent import run_investigation
 
 app = FastAPI(title="Fraud Investigation Agent API", version="2.0.0")
@@ -238,6 +241,16 @@ async def get_community(seed_id: str):
     try:
         graph = get_graph()
         return detect_communities(graph, seed_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/circular-flow/{account_id}")
+async def get_circular_flow(account_id: str):
+    """Detect circular money flows (cycles) originating from an account."""
+    try:
+        graph = get_graph()
+        return detect_circular_flow(graph, account_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
