@@ -618,6 +618,9 @@ LIMIT 5
         rows = _rows_to_dicts(result)
         if rows:
             r = rows[0]
+            # Guard: if any intermediate node is None, the cycle is degenerate
+            if not (r.get("start") and r.get("mid1") and r.get("mid2")):
+                return {"cycle_found": False}
             return {
                 "cycle_found": True,
                 "path": [r["start"], r["mid1"], r["mid2"], r["start"]],

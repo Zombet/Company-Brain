@@ -137,6 +137,54 @@ def detect_circular_flow_tool(account_id: str) -> str:
 
 
 @mcp.tool()
+def resolve_entity_tool(name: str) -> str:
+    """Resolve a plain human name or partial ID to a full entity ID in the graph.
+
+    Use this tool when the user provides a bare name (e.g. "alice", "bob") and you
+    are unsure of the correct prefixed ID (C_alice, A_alice1, etc.).
+    Tries common prefixes first (C_, A_, AL_, CASE_, T_, D_, ADDR_) then falls back
+    to a case-insensitive name search.
+    Returns {"id": "<full_id>", "label": "<node_label>"} or {"id": null, "label": null}.
+    """
+    graph = get_graph()
+    prefix_map = {
+        "C_": "Customer", "A_": "Account", "T_": "Transaction",
+        "D_": "Device", "ADDR_": "Address", "AL_": "Alert",
+        "CASE_": "Case",
+    }
+    # 1. Try prefix-based ID lookup
+    for prefix, label in prefix_map.items():
+        candidate = prefix + name
+        try:
+            r = graph.query("MATCH (n {id: $id}) RETURN n.id, labels(n)", {"id": candidate})
+            if r.result_set:
+                raw_label = r.result_set[0][1][0] if r.result_set[0][1] else None
+                return _str({"id": r.result_set[0][0], "label": raw_label or label})
+        except Exception:
+            pass
+    # 2. Fall back to case-insensitive name search
+    try:
+        r = graph.query(
+            "MATCH (n) WHERE toLower(n.name) CONTAINS toLower($name) "
+            "RETURN n.id, labels(n), n.name LIMIT 5",
+            {"name": name},
+        )
+        if r.result_set:
+            candidates = []
+            for row in r.result_set:
+                nid = row[0]
+                nlabels = row[1] or []
+                nname = row[2]
+                label = nlabels[0] if nlabels else "Customer"
+                candidates.append({"id": nid, "label": label, "name": nname})
+            return _str({"id": candidates[0]["id"], "label": candidates[0]["label"],
+                         "name": candidates[0]["name"], "candidates": candidates})
+    except Exception:
+        pass
+    return _str({"id": None, "label": None})
+
+
+@mcp.tool()
 def score_cluster_tool(community_id: str) -> str:
     """Compute an aggregate risk score for a community cluster.
 

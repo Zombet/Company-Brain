@@ -39,8 +39,10 @@ Common mappings: kunal->C_kunal, aryan->C_aryan, ifrah->C_ifrah, priya->C_priya,
 john->C_john, sarah->C_sarah, mike->C_mike, lisa->C_lisa, omar->C_omar, diana->C_diana, felix->C_felix,
 raj->C_raj, meera->C_meera, aditya->C_aditya, kingpin->C_kingpin, victor->C_kingpin.
 For accounts: john1->A_john1, kunal1->A_kunal1, kingpin1->A_kingpin1.
+If a name is NOT in the common mappings above, call resolve_entity_tool(name) first to get the correct ID.
 If unsure of the exact ID, use get_entity_profile_tool with your best guess of the C_ or A_ prefixed ID.
-- Circular flow / money cycle detection: detect_circular_flow_tool (use Account ID A_omar1)
+- Unknown name resolution: resolve_entity_tool (pass the bare name, returns the correct prefixed ID)
+- Circular flow / money cycle detection: detect_circular_flow_tool (use Account ID, e.g. A_omar1)
 - Entity context: get_entity_profile_tool
 - Ring/community: detect_communities_tool then score_cluster_tool
 - Money trail: trace_money_flow_tool

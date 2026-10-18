@@ -25,6 +25,19 @@ from graph.queries import (
     open_case,
     escalate_to_human,
 )
+
+def _label_from_id(entity_id: str) -> str:
+    """Detect the node label from the entity ID prefix convention."""
+    prefix_map = {
+        "C_": "Customer", "A_": "Account", "T_": "Transaction",
+        "D_": "Device", "ADDR_": "Address", "IP_": "IP",
+        "PH_": "Phone", "M_": "Merchant", "AL_": "Alert",
+        "CASE_": "Case", "EV_": "Evidence", "DEC_": "Decision", "ACT_": "Action",
+    }
+    for prefix, label in prefix_map.items():
+        if entity_id.startswith(prefix):
+            return label
+    return "Customer"
 from agent.fraud_agent import run_investigation
 
 app = FastAPI(title="Fraud Investigation Agent API", version="2.0.0")
@@ -93,14 +106,19 @@ async def resolve_entity(name: str):
         candidate = prefix + name
         r = graph.query("MATCH (n {id: $id}) RETURN n.id, labels(n)", {"id": candidate})
         if r.result_set:
-            return {"id": r.result_set[0][0], "label": r.result_set[0][1][0] if r.result_set[0][1] else None}
+            raw_label = r.result_set[0][1][0] if r.result_set[0][1] else None
+            label = raw_label if raw_label else _label_from_id(candidate)
+            return {"id": r.result_set[0][0], "label": label}
     # Try name match (case-insensitive contains)
     r = graph.query(
         "MATCH (n) WHERE toLower(n.name) CONTAINS toLower($name) RETURN n.id, labels(n), n.name LIMIT 3",
         {"name": name}
     )
     if r.result_set:
-        return {"id": r.result_set[0][0], "label": r.result_set[0][1][0] if r.result_set[0][1] else None, "name": r.result_set[0][2]}
+        raw_label = r.result_set[0][1][0] if r.result_set[0][1] else None
+        node_id = r.result_set[0][0]
+        label = raw_label if raw_label else _label_from_id(node_id)
+        return {"id": node_id, "label": label, "name": r.result_set[0][2]}
     raise HTTPException(status_code=404, detail=f"Could not resolve name: {name}")
 
 
