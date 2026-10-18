@@ -109,6 +109,8 @@ function elementsFromStep(step) {
 
   if (tool === 'get_entity_profile') {
     // obs = {node: {id, name, risk_score, ...}, neighbors: [{rel, label, id, rel_props}]}
+    // Only show meaningful node types — skip IP, Phone (too noisy)
+    const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action', 'Merchant', 'Evidence', 'Decision']
     const nodeProps = obs.node || {}
     const entityId = nodeProps.id || step.tool_input?.entity_id
     if (entityId) {
@@ -116,9 +118,11 @@ function elementsFromStep(step) {
       if (n) els.push(n)
       ;(obs.neighbors || []).forEach(nb => {
         if (!nb.id) return
-        const nbNode = makeNode(nb.id, nb.label || _labelFromId(nb.id), {})
+        const nbLabel = nb.label || _labelFromId(nb.id)
+        if (!SHOW_LABELS.includes(nbLabel)) return  // skip IP, Phone
+        const nbNode = makeNode(nb.id, nbLabel, {})
         if (nbNode) els.push(nbNode)
-        // Edge from entity to neighbor
+        // Edge — both nodes now exist so it's safe
         const rel = nb.rel || 'REL'
         const e = makeEdge(entityId, nb.id, rel)
         if (e) els.push(e)
@@ -288,17 +292,23 @@ export default function App() {
             .then(data => {
               const SHOW_LABELS = ['Customer', 'Account', 'Transaction', 'Device', 'Address', 'Alert', 'Case', 'Action']
               const extraEls = []
+              const addedIds = new Set()
+              // First pass: nodes only (filtered)
               ;(data.nodes || []).forEach(n => {
                 const nd = n.data || n
                 const lbl = nd.label || nd.nodeLabel || ''
                 if (!SHOW_LABELS.includes(lbl)) return
                 const props = nd.properties || {}
                 const node = makeNode(nd.id, lbl, { risk_score: props.risk_score, status: props.status })
-                if (node) extraEls.push(node)
+                if (node) { extraEls.push(node); addedIds.add(String(nd.id)) }
               })
+              // Second pass: edges only if BOTH endpoints exist
               ;(data.edges || []).forEach(e => {
                 const ed = e.data || e
-                const edge = makeEdge(ed.source, ed.target, ed.type || ed.label)
+                const src = String(ed.source || '')
+                const tgt = String(ed.target || '')
+                if (!src || !tgt || !addedIds.has(src) || !addedIds.has(tgt)) return
+                const edge = makeEdge(src, tgt, ed.type || ed.label)
                 if (edge) extraEls.push(edge)
               })
               if (extraEls.length > 0) addNodes(extraEls)

@@ -24,9 +24,12 @@ export function useGraph() {
     setElements(prev => {
       const existingIds = new Set(prev.map(e => e.data?.id))
       const newEls = []
+
+      // First pass: add all nodes
       nodes.forEach(n => {
         const id = n.data?.id
         if (!id || existingIds.has(id)) return
+        if (n.data?.source) return  // skip edges in first pass
         existingIds.add(id)
         newEls.push({
           data: {
@@ -38,6 +41,25 @@ export function useGraph() {
           classes: n.classes || undefined,
         })
       })
+
+      // Second pass: add edges — only if both endpoints exist
+      nodes.forEach(n => {
+        if (!n.data?.source) return  // skip nodes
+        const id = n.data?.id
+        if (!id || existingIds.has(id)) return
+        const src = String(n.data.source || '')
+        const tgt = String(n.data.target || '')
+        if (!src || !tgt || !existingIds.has(src) || !existingIds.has(tgt)) return
+        existingIds.add(id)
+        newEls.push({
+          data: {
+            ...n.data,
+            shortLabel: n.data?.label ? (EDGE_LABEL_MAP[n.data.label] || n.data.label) : '',
+          },
+          classes: n.classes || undefined,
+        })
+      })
+
       return newEls.length > 0 ? [...prev, ...newEls] : prev
     })
   }, [])
