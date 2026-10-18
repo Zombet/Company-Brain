@@ -101,7 +101,7 @@ async def resolve_entity(name: str):
     )
     if r.result_set:
         return {"id": r.result_set[0][0], "label": r.result_set[0][1][0] if r.result_set[0][1] else None, "name": r.result_set[0][2]}
-    return {"id": None, "label": None}
+    raise HTTPException(status_code=404, detail=f"Could not resolve name: {name}")
 
 
 # ---------------------------------------------------------------------------

@@ -268,7 +268,7 @@ def detect_communities(graph, seed_id: str) -> dict:
     cypher = """MATCH (seed {id: $id})-[*1..8]-(member)
 WHERE member.id <> $id
 RETURN DISTINCT member.id AS mid, labels(member) AS mlabels,
-       member.risk_score AS mrisk"""
+       member.risk_score AS mrisk, member.name AS mname"""
     try:
         result = graph.query(cypher, {"id": seed_id})
         rows = _rows_to_dicts(result)
@@ -285,6 +285,7 @@ RETURN DISTINCT member.id AS mid, labels(member) AS mlabels,
                 "id": mid,
                 "labels": mlabels,
                 "risk_score": row.get("mrisk"),
+                "name": row.get("mname"),
             })
             # Collect IDs for batch write-back (only meaningful node types)
             if "Customer" in mlabels:
@@ -622,7 +623,7 @@ LIMIT 5
                 "path": [r["start"], r["mid1"], r["mid2"], r["start"]],
                 "amounts": [r["amt1"], r["amt2"], r["amt3"]],
                 "timestamps": [r["ts1"], r["ts2"], r["ts3"]],
-                "extracted": float(r["amt1"] or 0) - float(r["amt3"] or 0)
+                "extracted": min(float(r["amt1"] or 0), float(r["amt2"] or 0), float(r["amt3"] or 0))
             }
         return {"cycle_found": False}
     except Exception as e:
